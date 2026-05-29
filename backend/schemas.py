@@ -1,14 +1,16 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 
 class ModelConfig(BaseModel):
-    provider: str = Field(..., pattern="^(anthropic|openai)$")
+    name: str
+    provider: str
     model_url: str
     api_key: str
     model_name: str
+    enabled: int = 1
 
 class ConnectionTestRequest(BaseModel):
-    provider: str = Field(..., pattern="^(anthropic|openai)$")
+    provider: str
     model_url: str
     api_key: str
     model_name: str

@@ -5,7 +5,7 @@ import uvicorn
 import httpx
 import time
 
-from database import init_db, get_all_configs, get_config_by_provider, save_config, delete_config
+from database import init_db, get_all_configs, get_enabled_configs, get_config_by_provider, save_config, update_config, toggle_config_enabled, delete_config_by_id
 from schemas import ModelConfig, ConnectionTestRequest, ConnectionTestResponse
 
 @asynccontextmanager
@@ -40,28 +40,34 @@ async def list_models():
     return {"configs": configs}
 
 
-@app.get("/api/models/{provider}")
-async def get_model(provider: str):
-    if provider not in ["anthropic", "openai"]:
-        raise HTTPException(status_code=400, detail="Invalid provider. Must be 'anthropic' or 'openai'")
-    config = await get_config_by_provider(provider)
-    if not config:
-        raise HTTPException(status_code=404, detail=f"Configuration for {provider} not found")
-    return {"config": config}
+@app.get("/api/models/enabled")
+async def list_enabled_models():
+    configs = await get_enabled_configs()
+    return {"configs": configs}
 
 
 @app.post("/api/models")
-async def create_or_update_model(config: ModelConfig):
-    await save_config(config.provider, config.model_url, config.api_key, config.model_name)
-    return {"message": f"Configuration for {config.provider} saved successfully"}
+async def create_model(config: ModelConfig):
+    await save_config(config.name, config.provider, config.model_url, config.api_key, config.model_name, config.enabled)
+    return {"message": f"Configuration '{config.name}' saved successfully"}
 
 
-@app.delete("/api/models/{provider}")
-async def delete_model(provider: str):
-    if provider not in ["anthropic", "openai"]:
-        raise HTTPException(status_code=400, detail="Invalid provider. Must be 'anthropic' or 'openai'")
-    await delete_config(provider)
-    return {"message": f"Configuration for {provider} deleted successfully"}
+@app.put("/api/models/{id}")
+async def update_model(id: int, config: ModelConfig):
+    await update_config(id, config.name, config.provider, config.model_url, config.api_key, config.model_name, config.enabled)
+    return {"message": f"Configuration '{config.name}' updated successfully"}
+
+
+@app.patch("/api/models/{id}/toggle")
+async def toggle_model(id: int, enabled: int):
+    await toggle_config_enabled(id, enabled)
+    return {"message": f"Configuration {id} enabled status updated"}
+
+
+@app.delete("/api/models/{id}")
+async def delete_model_by_id(id: int):
+    await delete_config_by_id(id)
+    return {"message": f"Configuration {id} deleted successfully"}
 
 
 @app.post("/api/models/test", response_model=ConnectionTestResponse)
@@ -75,7 +81,7 @@ async def test_connection(request: ConnectionTestRequest):
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            if request.provider == "anthropic":
+            if request.provider.lower() == "anthropic":
                 response = await client.post(
                     f"{request.model_url}/v1/messages",
                     headers=headers,
@@ -105,10 +111,6 @@ async def test_connection(request: ConnectionTestRequest):
                     response_time=round(elapsed_time, 3)
                 )
             else:
-                try:
-                    error_detail = response.json()
-                except Exception:
-                    error_detail = response.text[:200] if response.text else "Unknown error"
                 return ConnectionTestResponse(
                     success=False,
                     message=f"API error: {response.status_code}",
