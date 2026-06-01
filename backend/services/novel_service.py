@@ -1,398 +1,425 @@
+import logging
 import os
 import re
-from database import (
-    save_novel, get_novel_by_id, get_all_novels, update_novel_title,
-    update_novel_status, update_novel_parse_rule, delete_novel_by_id,
-    save_chapter, get_chapters_by_novel, get_chapter_content, delete_chapters_by_novel,
-    update_novel_file_path
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+from config import (
+    DEFAULT_CHUNK_SIZE,
+    MAX_RAW_PREVIEW_SIZE,
+    NOVELS_DIR,
+    PARSE_RULE_PREVIEW_LIMIT,
 )
-from config import NOVELS_DIR, DEFAULT_CHUNK_SIZE
+from database import (
+    get_all_novels,
+    get_chapter_with_file,
+    get_chapters_by_novel,
+    get_novel_by_id,
+    replace_chapters,
+    save_novel,
+    update_novel_file_path,
+    update_novel_parse_rule,
+    update_novel_status,
+    update_novel_title_author,
+)
+from services import file_service
+
+logger = logging.getLogger(__name__)
 
 
-async def list_all_novels():
+@dataclass
+class Chapter:
+    chapter_number: int
+    title: str
+    start_position: int = 0
+    end_position: int = 0
+    content: Optional[str] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "chapter_number": self.chapter_number,
+            "title": self.title,
+            "start_position": self.start_position,
+            "end_position": self.end_position,
+            "content": self.content,
+        }
+
+
+class ParseError(ValueError):
+    """Raised when chapter parsing fails."""
+
+
+def _safe_filename(raw: str) -> str:
+    name = os.path.basename(raw or "").strip()
+    name = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", name)
+    return name or "novel.txt"
+
+
+def _read_metadata_from_header(content: bytes) -> Tuple[str, str]:
+    try:
+        text = content[:4096].decode("utf-8", errors="ignore")
+    except Exception:
+        return "", ""
+    title = ""
+    author = ""
+    for line in text.splitlines()[:20]:
+        line = line.strip()
+        if not line:
+            continue
+        if not title and ("书名" in line or "title" in line.lower()):
+            parts = re.split(r"[:：]", line, maxsplit=1)
+            if len(parts) == 2 and parts[1].strip():
+                title = parts[1].strip()
+        if not author and ("作者" in line or "author" in line.lower()):
+            parts = re.split(r"[:：]", line, maxsplit=1)
+            if len(parts) == 2 and parts[1].strip():
+                author = parts[1].strip()
+    return title, author
+
+
+def _build_chapters_from_matches(
+    content: str, matches: List[re.Match[str]]
+) -> List[Chapter]:
+    total = len(content)
+    chapters: List[Chapter] = []
+    for idx, m in enumerate(matches):
+        start = m.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else total
+        if end < start:
+            end = start
+        chapters.append(
+            Chapter(
+                chapter_number=idx + 1,
+                title=m.group(0).strip()[:200],
+                start_position=start,
+                end_position=end,
+            )
+        )
+    return chapters
+
+
+def parse_with_rule(content: str, rule: str) -> List[Chapter]:
+    try:
+        pattern = re.compile(rule, re.MULTILINE)
+    except re.error as exc:
+        raise ParseError(f"正则表达式无效: {exc}") from exc
+    matches = list(pattern.finditer(content))
+    return _build_chapters_from_matches(content, matches)
+
+
+def parse_with_fixed_size(content: str, chunk_size: int) -> List[Chapter]:
+    if chunk_size <= 0:
+        raise ParseError("chunk_size 必须为正整数")
+
+    paragraphs = [p for p in content.splitlines() if p.strip()]
+    punctuation = set("。！？；，.!?,;\n")
+    chapters: List[Chapter] = []
+    chapter_no = 0
+    buffer: List[str] = []
+    buffer_len = 0
+
+    def flush_buffer(force: bool = False) -> None:
+        nonlocal chapter_no, buffer, buffer_len
+        if not buffer:
+            return
+        if not force and buffer_len < chunk_size:
+            return
+        chapter_no += 1
+        text = "\n".join(buffer).strip()
+        title = text[:30] + ("..." if len(text) > 30 else "")
+        chapters.append(
+            Chapter(
+                chapter_number=chapter_no,
+                title=title,
+                start_position=0,
+                end_position=0,
+                content=text,
+            )
+        )
+        buffer = []
+        buffer_len = 0
+
+    def cut_at_punct(text: str, target: int) -> int:
+        end = min(target, len(text))
+        if end >= len(text):
+            return end
+        window_start = max(end - 200, 0)
+        for i in range(end - 1, window_start, -1):
+            if text[i] in punctuation:
+                return i + 1
+        return end
+
+    for para in paragraphs:
+        pos = 0
+        while pos < len(para):
+            remaining = len(para) - pos
+            if buffer and buffer_len + remaining > chunk_size:
+                flush_buffer(force=True)
+            if remaining > chunk_size:
+                cut = cut_at_punct(para, pos + chunk_size)
+                if cut <= pos:
+                    cut = pos + chunk_size
+                piece = para[pos:cut]
+                if not piece:
+                    break
+                buffer.append(piece)
+                buffer_len += len(piece)
+                flush_buffer(force=True)
+                pos = cut
+            else:
+                buffer.append(para[pos:])
+                buffer_len += remaining
+                pos = len(para)
+                if buffer_len >= chunk_size:
+                    flush_buffer(force=True)
+
+    flush_buffer(force=True)
+    return chapters
+
+
+async def list_all_novels() -> List[Dict[str, Any]]:
     return await get_all_novels()
 
 
-async def get_novel_detail(novel_id: int):
+async def get_novel_detail(novel_id: int) -> Optional[Dict[str, Any]]:
     novel = await get_novel_by_id(novel_id)
     if not novel:
         return None
-    
     chapters = await get_chapters_by_novel(novel_id)
-    
-    return {
-        "id": novel['id'],
-        "title": novel['title'],
-        "author": novel['author'],
-        "filename": novel['filename'],
-        "file_path": novel['file_path'],
-        "file_size": novel['file_size'],
-        "status": novel['status'],
-        "parse_rule": novel['parse_rule'],
-        "chapter_count": len(chapters),
-        "chapters": chapters,
-        "created_at": novel['created_at'],
-        "updated_at": novel['updated_at']
-    }
+    novel["chapters"] = chapters
+    novel["chapter_count"] = len(chapters)
+    return novel
 
 
-async def upload_novel_file(file, file_path: str):
-    content = await file.read()
-    file_size = len(content)
-    
-    filename = file.filename
-    title = os.path.splitext(filename)[0]
-    author = '未知作者'
-    
-    novel_id = await save_novel(title, author, filename, file_path, file_size)
-    
-    try:
-        lines = content.decode('utf-8').split('\n', 20)
-        for line in lines[:20]:
-            if line.strip():
-                if '作者' in line or 'author' in line.lower():
-                    parts = re.split(r'[:：]', line, 1)
-                    if len(parts) > 1:
-                        author = parts[1].strip()
-                if '书名' in line or 'title' in line.lower():
-                    parts2 = re.split(r'[:：]', line, 1)
-                    if len(parts2) > 1:
-                        title = parts2[1].strip()
-    except:
-        pass
-    
-    if title or author != '未知作者':
-        await update_novel_title(novel_id, title, author)
-    
+async def upload_novel(
+    *,
+    original_filename: str,
+    content: bytes,
+) -> Dict[str, Any]:
+    if not content:
+        raise ParseError("文件内容为空")
+
+    safe = _safe_filename(original_filename)
+    derived_title, derived_author = _read_metadata_from_header(content)
+    if not derived_title:
+        derived_title = os.path.splitext(safe)[0]
+    if not derived_author:
+        derived_author = "未知作者"
+
+    placeholder_path = str(NOVELS_DIR / f"pending_{safe}")
+    await file_service.write_bytes(placeholder_path, content)
+
+    novel_id = await save_novel(
+        derived_title,
+        derived_author,
+        safe,
+        placeholder_path,
+        len(content),
+    )
+
+    final_path = str(NOVELS_DIR / f"{novel_id}_{safe}")
+    await file_service.write_bytes(final_path, content)
+    await file_service.remove_file(placeholder_path)
+    await update_novel_file_path(novel_id, final_path)
+
     return {
         "id": novel_id,
-        "title": title,
-        "author": author,
-        "filename": filename,
+        "title": derived_title,
+        "author": derived_author,
+        "filename": safe,
         "status": "pending",
-        "message": "上传成功"
+        "message": "上传成功",
     }
 
 
-async def update_novel_info(novel_id: int, title: str = None, author: str = None):
+async def update_novel_info(
+    novel_id: int,
+    title: Optional[str] = None,
+    author: Optional[str] = None,
+) -> bool:
     novel = await get_novel_by_id(novel_id)
     if not novel:
-        return None
-    
-    new_title = title if title else novel['title']
-    new_author = author if author else novel['author']
-    
-    await update_novel_title(novel_id, new_title, new_author)
-    return {"message": "小说信息已更新"}
+        return False
+    new_title = title.strip() if title else novel["title"]
+    new_author = author.strip() if author else novel["author"]
+    return await update_novel_title_author(novel_id, new_title, new_author)
 
 
-async def delete_novel(novel_id: int):
+async def delete_novel(novel_id: int) -> bool:
     novel = await get_novel_by_id(novel_id)
     if not novel:
-        return None
-    
-    if novel['file_path'] and os.path.exists(novel['file_path']):
-        try:
-            os.remove(novel['file_path'])
-        except:
-            pass
-    
-    await delete_novel_by_id(novel_id)
-    return {"message": "小说已删除"}
+        return False
+    await file_service.remove_file(novel.get("file_path"))
+    return await _delete_novel_db(novel_id)
 
 
-async def parse_chapters_by_rule(novel_id: int, rule: str):
+async def _delete_novel_db(novel_id: int) -> bool:
+    from database import delete_novel_by_id
+    return await delete_novel_by_id(novel_id)
+
+
+async def parse_chapters_by_rule(
+    novel_id: int, rule: str
+) -> Dict[str, Any]:
     novel = await get_novel_by_id(novel_id)
     if not novel:
-        return None
-    
-    if not novel['file_path'] or not os.path.exists(novel['file_path']):
-        return {"error": "Novel file not found"}
-    
-    try:
-        with open(novel['file_path'], 'r', encoding='utf-8') as f:
-            content = f.read()
-    except Exception as e:
-        return {"error": f"Failed to read file: {str(e)}"}
-    
-    await delete_chapters_by_novel(novel_id)
-    
-    try:
-        pattern = re.compile(rule, re.MULTILINE)
-        matches = list(pattern.finditer(content))
-    except Exception as e:
-        return {"error": f"Invalid regex pattern: {str(e)}"}
-    
-    if not matches:
-        await update_novel_status(novel_id, 'pending')
-        return {
-            "success": False,
-            "message": "未找到匹配的章节",
-            "chapters_found": 0,
-            "chapters": []
-        }
-    
-    chapters = []
-    for i, match in enumerate(matches):
-        start_pos = match.start()
-        title = match.group().strip()
-        chapter_number = i + 1
-        
-        if i + 1 < len(matches):
-            end_pos = matches[i + 1].start()
-        else:
-            end_pos = len(content)
-        
-        chapter_id = await save_chapter(novel_id, chapter_number, title, start_pos, end_pos)
-        chapters.append({
-            "id": chapter_id,
-            "chapter_number": chapter_number,
-            "title": title
-        })
-    
-    await update_novel_status(novel_id, 'parsed')
-    await update_novel_parse_rule(novel_id, rule)
-    
+        raise ParseError("小说不存在")
+    file_path = novel.get("file_path")
+    if not file_path:
+        raise ParseError("文件路径缺失")
+
+    content = await file_service.read_text_file(file_path)
+    chapters = parse_with_rule(content, rule)
+    return await _commit_chapters(novel_id, chapters, rule)
+
+
+async def parse_chapters_fixed_size(
+    novel_id: int, chunk_size: int
+) -> Dict[str, Any]:
+    novel = await get_novel_by_id(novel_id)
+    if not novel:
+        raise ParseError("小说不存在")
+    file_path = novel.get("file_path")
+    if not file_path:
+        raise ParseError("文件路径缺失")
+
+    content = await file_service.read_text_file(file_path)
+    chapters = parse_with_fixed_size(content, chunk_size)
+    return await _commit_chapters(novel_id, chapters, f"fixed:{chunk_size}")
+
+
+async def preview_chapters_by_rule(
+    novel_id: int, rule: str, limit: int = PARSE_RULE_PREVIEW_LIMIT
+) -> Dict[str, Any]:
+    novel = await get_novel_by_id(novel_id)
+    if not novel:
+        raise ParseError("小说不存在")
+    file_path = novel.get("file_path")
+    if not file_path:
+        raise ParseError("文件路径缺失")
+    content = await file_service.read_text_file(file_path)
+    chapters = parse_with_rule(content, rule)
     return {
-        "success": True,
-        "message": f"成功解析 {len(chapters)} 个章节",
         "chapters_found": len(chapters),
-        "chapters": chapters
+        "preview": [c.as_dict() for c in chapters[:limit]],
     }
 
 
-async def get_chapter(novel_id: int, chapter_id: int):
-    return await get_chapter_content(novel_id, chapter_id)
-
-
-async def get_raw_content(novel_id: int, chunk_size: int = DEFAULT_CHUNK_SIZE):
-    novel = await get_novel_by_id(novel_id)
-    if not novel:
-        return None
-    
-    if not novel['file_path'] or not os.path.exists(novel['file_path']):
-        return {"error": "Novel file not found"}
-    
-    try:
-        with open(novel['file_path'], 'r', encoding='utf-8') as f:
-            content = f.read()
-    except Exception as e:
-        return {"error": f"Failed to read file: {str(e)}"}
-    
-    chunks = smart_chunk_content(content, chunk_size)
-    
+async def _commit_chapters(
+    novel_id: int, chapters: List[Chapter], rule: str
+) -> Dict[str, Any]:
+    payload = [c.as_dict() for c in chapters]
+    inserted = await replace_chapters(novel_id, payload)
+    count = len(inserted)
+    await update_novel_status(novel_id, "parsed" if count else "pending")
+    if count:
+        await update_novel_parse_rule(novel_id, rule)
     return {
-        "id": novel['id'],
-        "title": novel['title'],
-        "author": novel['author'],
-        "status": novel['status'],
-        "total_length": len(content),
-        "chunks": chunks
+        "success": count > 0,
+        "chapters_found": count,
+        "chapters": inserted,
+        "message": (
+            f"成功解析 {count} 个章节" if count else "未找到匹配的章节"
+        ),
     }
 
 
-async def parse_chapters_fixed_size(novel_id: int, chunk_size: int):
-    novel = await get_novel_by_id(novel_id)
-    if not novel:
+async def get_chapter(novel_id: int, chapter_id: int) -> Optional[Dict[str, Any]]:
+    chapter = await get_chapter_with_file(novel_id, chapter_id)
+    if not chapter:
         return None
-    
-    if not novel['file_path'] or not os.path.exists(novel['file_path']):
-        return {"error": "Novel file not found"}
-    
-    try:
-        with open(novel['file_path'], 'r', encoding='utf-8') as f:
-            content = f.read()
-    except Exception as e:
-        return {"error": f"Failed to read file: {str(e)}"}
-    
-    await delete_chapters_by_novel(novel_id)
-    
-    paragraphs = content.split('\n')
-    chapters = []
-    chapter_number = 0
-    
-    def find_punctuation_cut(text, start_pos, end_pos):
-        for i in range(end_pos - 1, max(start_pos, end_pos - 200), -1):
-            if text[i] in '。！？；，.!?,;':
-                return i + 1
-        return end_pos
-    
-    current_pos = 0
-    chapter_content = []
-    chapter_start_pos = 0
-    
-    for paragraph in paragraphs:
-        paragraph = paragraph.strip()
-        if not paragraph:
-            continue
-        
-        paragraph_length = len(paragraph)
-        
-        while paragraph_length > chunk_size:
-            if chapter_content:
-                text = '\n'.join(chapter_content)
-                chapter_number += 1
-                chapters.append({
-                    "chapter_number": chapter_number,
-                    "title": text[:30] + ('...' if len(text) > 30 else ''),
-                    "start_position": chapter_start_pos,
-                    "end_position": chapter_start_pos + len(text)
-                })
-                chapter_content = []
-            
-            cut_end = find_punctuation_cut(paragraph, 0, chunk_size)
-            sub_text = paragraph[0:cut_end]
-            chapter_number += 1
-            sub_start = content.find(sub_text, current_pos)
-            if sub_start < 0:
-                sub_start = current_pos
-            chapters.append({
-                "chapter_number": chapter_number,
-                "title": sub_text[:30] + ('...' if len(sub_text) > 30 else ''),
-                "start_position": sub_start,
-                "end_position": sub_start + len(sub_text)
-            })
-            
-            current_pos += cut_end
-            paragraph = paragraph[cut_end:]
-            paragraph_length = len(paragraph)
-        
-        if chapter_content and (sum(len(p) for p in chapter_content) + paragraph_length > chunk_size):
-            text = '\n'.join(chapter_content)
-            chapter_number += 1
-            chapter_start = content.find(text, chapter_start_pos)
-            if chapter_start < 0:
-                chapter_start = chapter_start_pos
-            chapters.append({
-                "chapter_number": chapter_number,
-                "title": text[:30] + ('...' if len(text) > 30 else ''),
-                "start_position": chapter_start,
-                "end_position": chapter_start + len(text)
-            })
-            chapter_content = []
-            chapter_start_pos = content.find(paragraph, current_pos)
-            if chapter_start_pos < 0:
-                chapter_start_pos = current_pos
-        
-        if not chapter_content and paragraph:
-            chapter_start_pos = content.find(paragraph, current_pos)
-            if chapter_start_pos < 0:
-                chapter_start_pos = current_pos
-        
-        chapter_content.append(paragraph)
-        current_pos = chapter_start_pos + len(paragraph)
-    
-    if chapter_content:
-        text = '\n'.join(chapter_content)
-        chapter_number += 1
-        chapter_start = content.find(text, chapter_start_pos)
-        if chapter_start < 0:
-            chapter_start = chapter_start_pos
-        chapters.append({
-            "chapter_number": chapter_number,
-            "title": text[:30] + ('...' if len(text) > 30 else ''),
-            "start_position": chapter_start,
-            "end_position": chapter_start + len(text)
-        })
-    
-    for chapter in chapters:
-        chapter_id = await save_chapter(
-            novel_id, 
-            chapter['chapter_number'], 
-            chapter['title'], 
-            chapter['start_position'], 
-            chapter['end_position']
+    stored_content = chapter.get("content")
+    if stored_content:
+        chapter["content"] = stored_content
+        return chapter
+    file_path = chapter.get("file_path")
+    if file_path and await file_service.file_size(file_path) > 0:
+        chapter["content"] = await file_service.read_text_slice(
+            file_path, chapter["start_position"], chapter["end_position"]
         )
-        chapter['id'] = chapter_id
-    
-    await update_novel_status(novel_id, 'parsed')
-    await update_novel_parse_rule(novel_id, f"fixed:{chunk_size}")
-    
+    else:
+        chapter["content"] = ""
+    return chapter
+
+
+async def get_raw_content(
+    novel_id: int, chunk_size: int = DEFAULT_CHUNK_SIZE
+) -> Optional[Dict[str, Any]]:
+    novel = await get_novel_by_id(novel_id)
+    if not novel:
+        return None
+    file_path = novel.get("file_path")
+    if not file_path:
+        raise ParseError("文件路径缺失")
+
+    size = await file_service.file_size(file_path)
+    if size > MAX_RAW_PREVIEW_SIZE:
+        raise ParseError(
+            f"文件过大({size} bytes)，超过原始预览上限 {MAX_RAW_PREVIEW_SIZE}"
+        )
+    content = await file_service.read_text_file(file_path)
     return {
-        "success": True,
-        "message": f"成功解析 {len(chapters)} 个章节",
-        "chapters_found": len(chapters),
-        "chapters": [{"id": c['id'], "chapter_number": c['chapter_number'], "title": c['title']} for c in chapters]
+        "id": novel["id"],
+        "title": novel["title"],
+        "author": novel["author"],
+        "status": novel["status"],
+        "total_length": len(content),
+        "chunks": smart_chunk_content(content, chunk_size),
     }
 
 
-def smart_chunk_content(content: str, chunk_size: int = 5000) -> list:
-    if len(content) <= chunk_size:
-        return [{
-            "chunk_number": 1,
-            "title": content[:10] if len(content) >= 10 else content,
-            "content": content
-        }]
-    
-    paragraphs = content.split('\n')
-    chunks = []
-    current_chunk = ""
-    current_length = 0
-    chunk_number = 1
-    
-    for paragraph in paragraphs:
-        paragraph_length = len(paragraph)
-        
-        if paragraph_length > chunk_size:
-            if current_chunk:
-                chunks.append({
-                    "chunk_number": chunk_number,
-                    "title": current_chunk[:10] if len(current_chunk) >= 10 else current_chunk,
-                    "content": current_chunk.strip()
-                })
-                chunk_number += 1
-                current_chunk = ""
-                current_length = 0
-            
-            sub_chunks = []
+def smart_chunk_content(content: str, chunk_size: int = DEFAULT_CHUNK_SIZE) -> List[Dict[str, Any]]:
+    if chunk_size <= 0:
+        chunk_size = DEFAULT_CHUNK_SIZE
+    if not content:
+        return []
+
+    paragraphs = [p for p in content.splitlines() if p.strip()]
+    punctuation = set("。！？；，.!?,;")
+    chunks: List[Dict[str, Any]] = []
+    state = {"number": 0}
+
+    def title_for(text: str) -> str:
+        return text[:10] if len(text) >= 10 else text
+
+    def add(text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        state["number"] += 1
+        chunks.append(
+            {
+                "chunk_number": state["number"],
+                "title": title_for(text),
+                "content": text,
+            }
+        )
+
+    current = ""
+    for para in paragraphs:
+        if len(para) > chunk_size:
+            if current:
+                add(current)
+                current = ""
             start = 0
-            while start < paragraph_length:
-                end = min(start + chunk_size, paragraph_length)
-                if end < paragraph_length:
-                    search_start = max(start, end - 200)
-                    search_end = min(end + 200, paragraph_length)
-                    punctuation_marks = ['。', '！', '？', '；', '，', '.', '!', '?', ';', ',']
-                    best_cut = end
-                    for i in range(search_start, search_end):
-                        if paragraph[i] in punctuation_marks:
-                            best_cut = i + 1
+            while start < len(para):
+                end = min(start + chunk_size, len(para))
+                if end < len(para):
+                    window_start = max(start, end - 200)
+                    cut = end
+                    for i in range(window_start, end):
+                        if para[i] in punctuation:
+                            cut = i + 1
                             break
-                    end = best_cut
-                
-                sub_chunk = paragraph[start:end].strip()
-                if sub_chunk:
-                    sub_chunks.append({
-                        "chunk_number": chunk_number,
-                        "title": sub_chunk[:10] if len(sub_chunk) >= 10 else sub_chunk,
-                        "content": sub_chunk
-                    })
-                    chunk_number += 1
+                    end = cut
+                add(para[start:end])
                 start = end
-            
-            chunks.extend(sub_chunks)
             continue
-        
-        if current_length + paragraph_length > chunk_size and current_chunk:
-            chunks.append({
-                "chunk_number": chunk_number,
-                "title": current_chunk[:10] if len(current_chunk) >= 10 else current_chunk,
-                "content": current_chunk.strip()
-            })
-            chunk_number += 1
-            current_chunk = paragraph
-            current_length = paragraph_length
+        if current and len(current) + len(para) + 1 > chunk_size:
+            add(current)
+            current = para
         else:
-            if current_chunk:
-                current_chunk += '\n' + paragraph
-            else:
-                current_chunk = paragraph
-            current_length += paragraph_length
-    
-    if current_chunk.strip():
-        chunks.append({
-            "chunk_number": chunk_number,
-            "title": current_chunk[:10] if len(current_chunk) >= 10 else current_chunk,
-            "content": current_chunk.strip()
-        })
-    
+            current = f"{current}\n{para}" if current else para
+    if current:
+        add(current)
     return chunks

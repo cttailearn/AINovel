@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.db
 .env
+.env.*
 
 # Dependencies
 node_modules/
@@ -19,3 +20,25 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+e2e_output.txt
+pytest_output.txt
+pytest_full.txt
+
+# Backend runtime data
+backend/novels/
+backend/models.db
+backend/stdout.log
+backend/stderr.log
+backend/vite.err
+
+# Frontend dev artifacts
+frontend/vite.err
+frontend/vite.log
+
+# Trae IDE
+.traedocument/

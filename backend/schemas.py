@@ -1,13 +1,16 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
 
 class ModelConfig(BaseModel):
-    name: str
-    provider: str
-    model_url: str
-    api_key: str
-    model_name: str
-    enabled: int = 1
+    name: str = Field(..., min_length=1, max_length=200)
+    provider: str = Field(..., min_length=1, max_length=50)
+    model_url: str = Field(..., min_length=1, max_length=500)
+    api_key: str = Field(..., min_length=1, max_length=500)
+    model_name: str = Field(..., min_length=1, max_length=200)
+    enabled: bool = True
+
 
 class ConnectionTestRequest(BaseModel):
     provider: str
@@ -15,16 +18,48 @@ class ConnectionTestRequest(BaseModel):
     api_key: str
     model_name: str
 
+
 class ConnectionTestResponse(BaseModel):
     success: bool
     message: str
     response_time: Optional[float] = None
 
-class NovelBase(BaseModel):
-    title: str
-    author: str = '未知作者'
 
-class NovelInfo(BaseModel):
+class NovelUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=500)
+    author: Optional[str] = Field(default=None, max_length=200)
+
+
+class ParseRuleRequest(BaseModel):
+    rule: str = Field(..., min_length=1, max_length=500)
+
+
+class ParseFixedRequest(BaseModel):
+    chunk_size: int = Field(default=5000, gt=0, le=100_000)
+
+
+class ChapterBase(BaseModel):
+    chapter_number: int
+    title: str
+    start_position: int
+    end_position: int
+
+
+class ChapterOut(ChapterBase):
+    id: int
+    novel_id: int
+    created_at: Optional[str] = None
+
+
+class ChapterDetail(ChapterOut):
+    content: Optional[str] = None
+
+
+class ChapterPreview(ChapterBase):
+    pass
+
+
+class NovelSummary(BaseModel):
     id: int
     title: str
     author: str
@@ -34,27 +69,42 @@ class NovelInfo(BaseModel):
     parse_rule: Optional[str] = None
     created_at: str
 
-class NovelDetail(NovelInfo):
+
+class NovelDetail(NovelSummary):
     file_path: str
     file_size: int
     updated_at: str
-    chapters: List[dict] = []
+    chapters: List[ChapterOut] = []
 
-class ParseRuleRequest(BaseModel):
-    rule: str
 
-class ParseRuleResponse(BaseModel):
+class ParseResponse(BaseModel):
     success: bool
     message: str
     chapters_found: int = 0
-    chapters: List[dict] = []
+    chapters: List[ChapterOut] = []
 
-class ChapterInfo(BaseModel):
+
+class ParsePreviewResponse(BaseModel):
+    chapters_found: int
+    preview: List[ChapterPreview]
+
+
+class NovelUploadResponse(BaseModel):
     id: int
-    novel_id: int
-    chapter_number: int
     title: str
-    start_position: int
-    end_position: int
-    content: Optional[str] = None
-    created_at: Optional[str] = None
+    author: str
+    filename: str
+    status: str
+    message: str
+
+
+class NovelListResponse(BaseModel):
+    novels: List[NovelSummary]
+
+
+class ModelListResponse(BaseModel):
+    configs: List[dict]
+
+
+class ErrorResponse(BaseModel):
+    detail: str

@@ -2335,3 +2335,278 @@ input:checked + .slider:before {
     right: 1rem;
   }
 }
+/* === 新增：Toast 通知 === */
+.toast-stack {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 360px;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  animation: toast-slide-in 0.2s ease;
+}
+
+.toast-success {
+  border-color: var(--success);
+}
+.toast-error {
+  border-color: var(--error);
+  color: var(--error);
+}
+.toast-info {
+  border-color: var(--primary);
+}
+
+.toast-message {
+  flex: 1;
+  font-size: 0.85rem;
+}
+
+.toast-close {
+  background: transparent;
+  border: none;
+  font-size: 1.1rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  line-height: 1;
+}
+
+@keyframes toast-slide-in {
+  from { transform: translateX(20px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+/* === 新增：Modal 弹窗 === */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  padding: 1rem;
+}
+
+.modal-panel {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  max-width: 420px;
+  width: 100%;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+}
+
+.modal-title {
+  font-size: 1.1rem;
+  margin-bottom: 0.5rem;
+  color: var(--text-primary);
+}
+
+.modal-message {
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+/* === 新增：通用按钮 === */
+.btn {
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn:hover { background: rgba(99, 102, 241, 0.08); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: white;
+}
+.btn-primary:hover { background: var(--primary-hover); }
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+}
+
+.btn-danger {
+  background: var(--error);
+  border-color: var(--error);
+  color: white;
+}
+.btn-danger:hover { background: #dc2626; }
+
+/* === 新增：错误边界 === */
+.error-boundary {
+  padding: 3rem;
+  text-align: center;
+  background: var(--card-bg);
+  border: 1px solid var(--error);
+  border-radius: 12px;
+  margin: 2rem auto;
+  max-width: 600px;
+}
+
+.error-boundary h2 {
+  color: var(--error);
+  margin-bottom: 0.5rem;
+}
+
+.error-boundary p {
+  color: var(--text-secondary);
+  margin-bottom: 1.5rem;
+}
+
+/* === 新增：上传进度 === */
+.upload-progress {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+}
+
+.upload-progress-bar {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.2s ease;
+}
+
+.upload-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* === 新增：tab 角标 === */
+.tab-badge {
+  background: rgba(255, 255, 255, 0.25);
+  padding: 0.05rem 0.4rem;
+  border-radius: 8px;
+  font-size: 0.7rem;
+  margin-left: 0.25rem;
+}
+.tab-btn:not(.active) .tab-badge {
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--primary);
+}
+
+/* === 新增：加载块 === */
+.loading-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 1rem;
+  color: var(--text-secondary);
+}
+
+.loading-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.loading-spinner.small {
+  width: 12px;
+  height: 12px;
+}
+
+.loading-spinner.large {
+  width: 32px;
+  height: 32px;
+  border-width: 3px;
+}
+
+/* === 新增：解析预览 === */
+.parse-preview {
+  background: rgba(99, 102, 241, 0.05);
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.parse-preview span {
+  font-weight: 600;
+  display: block;
+  margin-bottom: 0.4rem;
+}
+
+.preview-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.preview-list li {
+  padding: 0.2rem 0;
+}
+
+/* === 新增：内联标签 === */
+.inline-label {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+/* === 新增：小说卡片删除按钮 === */
+.novel-card-actions {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.card-delete-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+}
+
+.card-delete-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--error);
+  color: var(--error);
+}
