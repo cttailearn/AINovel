@@ -35,6 +35,7 @@ SCHEMA_STATEMENTS: List[str] = [
         file_size INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'pending',
         parse_rule TEXT,
+        summary TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
@@ -53,8 +54,25 @@ SCHEMA_STATEMENTS: List[str] = [
         UNIQUE (novel_id, chapter_number)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS characters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        novel_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        role TEXT,
+        aliases TEXT,
+        description TEXT,
+        first_appearance INTEGER,
+        model_id INTEGER,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
+        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL
+    )
+    """,
     "CREATE INDEX IF NOT EXISTS idx_chapters_novel ON chapters(novel_id)",
     "CREATE INDEX IF NOT EXISTS idx_novels_created ON novels(created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_characters_novel ON characters(novel_id)",
 ]
 
 
@@ -64,7 +82,15 @@ async def init_db() -> None:
         await db.execute("PRAGMA foreign_keys = ON")
         for stmt in SCHEMA_STATEMENTS:
             await db.execute(stmt)
+        await _run_migrations(db)
         await db.commit()
+
+
+async def _run_migrations(db: aiosqlite.Connection) -> None:
+    novel_columns = await _get_table_columns(db, "novels")
+    if novel_columns and "summary" not in novel_columns:
+        await db.execute("ALTER TABLE novels ADD COLUMN summary TEXT")
+        logger.info("Migration: added novels.summary column")
 
 
 @asynccontextmanager
@@ -80,6 +106,14 @@ async def get_db() -> AsyncIterator[aiosqlite.Connection]:
 
 def _rows_to_dicts(rows: Iterable[aiosqlite.Row]) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
+
+
+async def _get_table_columns(
+    db: aiosqlite.Connection, table: str
+) -> List[str]:
+    cur = await db.execute(f"PRAGMA table_info({table})")
+    rows = await cur.fetchall()
+    return [row[1] for row in rows]
 
 
 async def get_all_configs() -> List[Dict[str, Any]]:
@@ -187,15 +221,16 @@ async def save_novel(
     filename: str,
     file_path: str,
     file_size: int,
+    summary: Optional[str] = None,
 ) -> int:
     async with get_db() as db:
         cur = await db.execute(
             """
             INSERT INTO novels
-                (title, author, filename, file_path, file_size, status)
-            VALUES (?, ?, ?, ?, ?, 'pending')
+                (title, author, filename, file_path, file_size, status, summary)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
             """,
-            (title, author, filename, file_path, file_size),
+            (title, author, filename, file_path, file_size, summary),
         )
         await db.commit()
         return cur.lastrowid or 0
@@ -374,3 +409,86 @@ def _safe_remove(path: Optional[str]) -> None:
             os.remove(path)
     except OSError as exc:
         logger.warning("Failed to remove file %s: %s", path, exc)
+
+
+def _normalize_aliases(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(",") if v.strip()]
+    return [str(value).strip()]
+
+
+async def replace_characters(
+    novel_id: int,
+    characters: List[Dict[str, Any]],
+    model_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute("DELETE FROM characters WHERE novel_id = ?", (novel_id,))
+        inserted: List[Dict[str, Any]] = []
+        for item in characters:
+            aliases = _normalize_aliases(item.get("aliases"))
+            cur = await db.execute(
+                """
+                INSERT INTO characters
+                    (novel_id, name, role, aliases, description,
+                     first_appearance, model_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    novel_id,
+                    str(item.get("name", "")).strip()[:200] or "未命名",
+                    (item.get("role") or "").strip() or None,
+                    ",".join(aliases) or None,
+                    (item.get("description") or "").strip() or None,
+                    int(item["first_appearance"]) if item.get("first_appearance") else None,
+                    model_id,
+                ),
+            )
+            inserted.append(
+                {
+                    "id": cur.lastrowid,
+                    "novel_id": novel_id,
+                    "name": str(item.get("name", "")).strip(),
+                    "role": (item.get("role") or "").strip() or None,
+                    "aliases": aliases,
+                    "description": (item.get("description") or "").strip() or None,
+                    "first_appearance": int(item["first_appearance"])
+                    if item.get("first_appearance")
+                    else None,
+                    "model_id": model_id,
+                }
+            )
+        await db.commit()
+        return inserted
+
+
+async def get_characters_by_novel(novel_id: int) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT id, novel_id, name, role, aliases, description,
+                   first_appearance, model_id, created_at, updated_at
+            FROM characters
+            WHERE novel_id = ?
+            ORDER BY id
+            """,
+            (novel_id,),
+        )
+        rows = _rows_to_dicts(await cur.fetchall())
+    for row in rows:
+        aliases = row.get("aliases") or ""
+        row["aliases"] = [a for a in aliases.split(",") if a] if aliases else []
+    return rows
+
+
+async def delete_characters_by_novel(novel_id: int) -> int:
+    async with get_db() as db:
+        cur = await db.execute("DELETE FROM characters WHERE novel_id = ?", (novel_id,))
+        await db.commit()
+        return cur.rowcount or 0
+

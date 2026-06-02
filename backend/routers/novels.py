@@ -12,6 +12,8 @@ from config import (
 )
 from schemas import (
     ChapterDetail,
+    CharacterExtractionRequest,
+    CharacterExtractionResponse,
     NovelDetail,
     NovelListResponse,
     NovelUpdate,
@@ -24,10 +26,12 @@ from schemas import (
 from services import (
     ParseError,
     delete_novel,
+    extract_characters,
     get_chapter,
     get_novel_detail,
     get_raw_content,
     list_all_novels,
+    list_characters,
     parse_chapters_by_rule,
     parse_chapters_fixed_size,
     preview_chapters_by_rule,
@@ -174,3 +178,45 @@ async def get_raw_content_endpoint(
         return await get_raw_content(novel_id, chunk_size)
     except ParseError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/{novel_id}/characters")
+async def get_characters_endpoint(novel_id: int):
+    if not await get_novel_detail(novel_id):
+        raise HTTPException(status_code=404, detail="小说不存在")
+    characters = await list_characters(novel_id)
+    return {"characters": characters}
+
+
+@router.post(
+    "/{novel_id}/characters",
+    response_model=CharacterExtractionResponse,
+)
+async def extract_characters_endpoint(
+    novel_id: int, payload: CharacterExtractionRequest
+):
+    if not await get_novel_detail(novel_id):
+        raise HTTPException(status_code=404, detail="小说不存在")
+    try:
+        result = await extract_characters(
+            novel_id,
+            model_config_id=payload.model_config_id,
+            max_chars=payload.max_chars,
+            max_characters=payload.max_characters,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Character extraction failed: %s", exc)
+        raise HTTPException(status_code=500, detail="人物提取失败，请稍后重试")
+    characters = result["characters"]
+    return CharacterExtractionResponse(
+        success=True,
+        message=(
+            f"共识别 {len(characters)} 位人物"
+            if characters
+            else "未识别到明显人物"
+        ),
+        model=result.get("model"),
+        characters=characters,
+    )

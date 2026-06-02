@@ -77,6 +77,29 @@ def _read_metadata_from_header(content: bytes) -> Tuple[str, str]:
     return title, author
 
 
+def _build_summary(content: bytes, max_len: int = 140) -> str:
+    try:
+        text = content[:8192].decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+    pieces: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if ("书名" in stripped or "作者" in stripped) and (
+            ":" in stripped or "：" in stripped
+        ):
+            continue
+        pieces.append(stripped)
+        if sum(len(p) for p in pieces) >= max_len:
+            break
+    summary = " ".join(pieces)
+    if len(summary) > max_len:
+        summary = summary[: max_len].rstrip() + "..."
+    return summary
+
+
 def _build_chapters_from_matches(
     content: str, matches: List[re.Match[str]]
 ) -> List[Chapter]:
@@ -205,6 +228,7 @@ async def upload_novel(
         derived_title = os.path.splitext(safe)[0]
     if not derived_author:
         derived_author = "未知作者"
+    derived_summary = _build_summary(content)
 
     placeholder_path = str(NOVELS_DIR / f"pending_{safe}")
     await file_service.write_bytes(placeholder_path, content)
@@ -215,6 +239,7 @@ async def upload_novel(
         safe,
         placeholder_path,
         len(content),
+        derived_summary,
     )
 
     final_path = str(NOVELS_DIR / f"{novel_id}_{safe}")
@@ -228,6 +253,7 @@ async def upload_novel(
         "author": derived_author,
         "filename": safe,
         "status": "pending",
+        "summary": derived_summary,
         "message": "上传成功",
     }
 

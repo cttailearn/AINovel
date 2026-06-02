@@ -175,5 +175,13 @@ export const api = {
       apiRequest(`/novels/${id}/raw?chunk_size=${chunkSize}`, options),
     upload: (file, { onProgress, signal } = {}) =>
       uploadWithProgress('/novels/upload', file, { onProgress, signal }),
+    listCharacters: (id, options) =>
+      apiRequest(`/novels/${id}/characters`, options),
+    extractCharacters: (id, payload, options) =>
+      apiRequest(`/novels/${id}/characters`, {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
   },
 };

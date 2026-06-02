@@ -1,5 +1,6 @@
 from . import file_service
 from .ai_service import test_connection
+from .character_service import extract_characters, list_characters
 from .model_service import (
     create_model,
     delete_model,
@@ -46,4 +47,7 @@ __all__ = [
     "get_raw_content",
     "smart_chunk_content",
     "ParseError",
+    "extract_characters",
+    "list_characters",
 ]
+

@@ -67,6 +67,7 @@ class NovelSummary(BaseModel):
     status: str
     chapter_count: int = 0
     parse_rule: Optional[str] = None
+    summary: Optional[str] = None
     created_at: str
 
 
@@ -108,3 +109,25 @@ class ModelListResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class CharacterExtractionRequest(BaseModel):
+    model_config_id: Optional[int] = Field(default=None, ge=1)
+    max_chars: int = Field(default=8000, ge=1000, le=120_000)
+    max_characters: int = Field(default=20, ge=1, le=100)
+
+
+class Character(BaseModel):
+    name: str
+    role: Optional[str] = None
+    aliases: List[str] = []
+    description: Optional[str] = None
+    first_appearance: Optional[int] = None
+
+
+class CharacterExtractionResponse(BaseModel):
+    success: bool
+    message: str
+    model: Optional[str] = None
+    characters: List[Character] = []
+
