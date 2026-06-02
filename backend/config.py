@@ -3,8 +3,9 @@ from pathlib import Path
 from typing import List
 
 BASE_DIR = Path(__file__).parent
-NOVELS_DIR = BASE_DIR / "novels"
-DATABASE_PATH = BASE_DIR / "models.db"
+DATA_DIR = BASE_DIR / "data"
+NOVELS_DIR = DATA_DIR / "novels"
+DATABASE_PATH = DATA_DIR / "models.db"
 
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8008"))
@@ -13,7 +14,7 @@ CORS_ORIGINS: List[str] = [
     o.strip()
     for o in os.getenv(
         "CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,tauri://localhost,http://tauri.localhost",
     ).split(",")
     if o.strip()
 ]
@@ -28,4 +29,5 @@ PARSE_RULE_PREVIEW_LIMIT = 20
 
 ALLOWED_NOVEL_EXT = {".txt"}
 
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 NOVELS_DIR.mkdir(parents=True, exist_ok=True)

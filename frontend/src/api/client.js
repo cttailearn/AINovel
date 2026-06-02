@@ -1,4 +1,6 @@
-const API_PREFIX = '/api';
+const API_PREFIX = (typeof window !== 'undefined' && window.__TAURI_INTERNALS__)
+  ? 'http://127.0.0.1:8008/api'
+  : '/api';
 
 export class ApiError extends Error {
   constructor(message, status, payload) {

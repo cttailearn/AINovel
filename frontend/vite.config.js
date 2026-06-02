@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   root: '.',
   publicDir: 'public',
+  base: './',
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
@@ -13,6 +14,7 @@ export default defineConfig({
   server: {
     port: 5173,
     host: '127.0.0.1',
+    strictPort: true,
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8008',
@@ -20,4 +22,6 @@ export default defineConfig({
       },
     },
   },
+  clearScreen: false,
+  envPrefix: ['VITE_', 'TAURI_'],
 });

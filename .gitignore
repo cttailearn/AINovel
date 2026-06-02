@@ -1,44 +1,64 @@
-# Environment
-.venv/
+# ============================================
+#   AI 小说管理系统 - Git 忽略规则
+# ============================================
+
+# --- Python 后端 ---
 __pycache__/
 *.pyc
-*.db
-.env
-.env.*
-
-# Dependencies
-node_modules/
-dist/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-
-# Test artifacts
+*.pyo
+*.pyd
 .pytest_cache/
 .coverage
 htmlcov/
+*.egg-info/
+.venv/
+venv/
+
+# Python 运行时数据库和用户数据
+backend/data/
+backend/.env
+backend/.env.*
+
+# --- Node.js 前端 ---
+node_modules/
+dist/
+*.tsbuildinfo
+
+# --- Rust / Tauri ---
+src-tauri/target/
+src-tauri/gen/
+src-tauri/WixTools/
+*.msi
+*.nsis
+
+# --- 日志和运行时输出 ---
+*.log
+*.err
+stdout.log
+stderr.log
+vite.log
+vite.err
+
+# --- IDE / 编辑器 ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- 操作系统 ---
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- 临时/测试输出 ---
 e2e_output.txt
 pytest_output.txt
 pytest_full.txt
+*.tmp
+*.bak
 
-# Backend runtime data
-backend/novels/
-backend/models.db
-backend/stdout.log
-backend/stderr.log
-backend/vite.err
-
-# Frontend dev artifacts
-frontend/vite.err
-frontend/vite.log
-
-# Trae IDE
-.traedocument/
+# --- Trae IDE（如果存在则忽略）---
+.trae/
+.trae
