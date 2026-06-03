@@ -1,0 +1,509 @@
+"""AI prompt template management service.
+
+Centralises every prompt that the application sends to the LLM, exposing
+CRUD endpoints so users can view and customise them from the UI.
+
+Each prompt template is keyed by a stable string identifier (e.g.
+``kg.character``) so the rest of the codebase can fetch the active
+template by key. The defaults are seeded on first run.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List, Optional
+
+from database import get_db
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Default prompt templates
+# ---------------------------------------------------------------------------
+
+# NOTE: These defaults must stay aligned with the historical hard-coded
+# behaviour so users get a familiar experience out of the box. Variables
+# inside ``user_prompt_template`` are referenced through ``str.format``
+# with explicit ``{{`` / ``}}`` escaping (since the prompts themselves
+# contain JSON examples with braces).
+
+PROMPT_CATEGORIES = [
+    {
+        "key": "connection",
+        "label": "连接测试",
+        "description": "用于测试模型连通性、检验模型凭证是否有效的轻量提示词。",
+    },
+    {
+        "key": "kg",
+        "label": "知识图谱抽取",
+        "description": "在构建人物 / 事件 / 关系知识图谱时使用的五段式提示词。",
+    },
+]
+
+
+DEFAULT_PROMPTS: List[Dict[str, Any]] = [
+    # ---- connection test ---------------------------------------------------
+    {
+        "key": "connection.test",
+        "category": "connection",
+        "name": "连接测试提示词",
+        "description": "用于向模型发送最小请求以验证连接与凭证。max_tokens 固定为 1。",
+        "system_prompt": "",
+        "user_prompt_template": "hi",
+        "temperature": 0.0,
+        "max_tokens": 1,
+    },
+    # ---- knowledge graph ---------------------------------------------------
+    {
+        "key": "kg.character",
+        "category": "kg",
+        "name": "人物实体抽取",
+        "description": "Phase 1: 从小说片段中抽取人物实体及其内在属性。",
+        "system_prompt": (
+            "你是一名小说知识图谱构建专家，擅长从中文长篇小说片段中识别关键人物实体，"
+            "并仅记录描述人物自身特征的内在属性（标量信息），不涉及与其他人物/事件的关系。"
+            "请严格输出 JSON 数组（不要包裹在对象里），不要输出解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """你是小说知识图谱构建专家。请从以下小说文本中提取所有**人物实体**，并仅提取其**内在属性**（即描述人物自身特征的标量信息，不涉及人物间关系）。
+
+输入文本：
+{chunk_text}
+
+任务要求：
+1. 为每个人物赋予唯一ID（如 `char_001`，同一人物在不同片段尽量复用同一ID；无法确认则新建）。
+2. 提取以下内在属性（如果文中出现）：
+   - 别名/字号
+   - 性别
+   - 身份/职位/地位简述（如「荣国府嫡孙」）
+   - 性格标签
+   - 外貌特征
+   - 其他描述人物自身且不指向其他实体的信息
+3. 严禁将人物与其他人物、地点、组织的关系混入属性。例如「丫鬟是袭人」不能作为字段，因为袭人是另一个人物实体。
+4. 如果同一人物在不同段落出现，尽量合并，使用同一ID；无法确认的宁可新建，后续再合并。
+
+输出格式：严格输出 JSON 数组，每个元素为一个人物对象：
+[
+  {{
+    "id": "char_001",
+    "name": "贾宝玉",
+    "attributes": {{
+      "别名": ["怡红公子", "绛洞花主"],
+      "性别": "男",
+      "身份": "贾府嫡孙",
+      "性格": ["叛逆", "多情"],
+      "外貌": "面如中秋之月，色如春晓之花"
+    }}
+  }}
+]
+如果没有提取到任何人物，返回空数组 []。""",
+        "temperature": 0.3,
+        "max_tokens": 2400,
+    },
+    {
+        "key": "kg.event",
+        "category": "kg",
+        "name": "事件实体抽取",
+        "description": "Phase 2: 从片段中识别事件实体（情节单元）。",
+        "system_prompt": (
+            "你是一名小说知识图谱构建专家，擅长从中文长篇小说片段中识别事件实体（情节单元），"
+            "并仅记录事件自身的内在属性（时间/地点/章回/摘要/起因/结果），不参与人物关系建模。"
+            "请严格输出 JSON 数组，不要输出解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """你是小说知识图谱构建专家。请从以下文本中提取所有**事件实体**（情节单元），并提取其内在属性。
+
+输入文本：
+{chunk_text}
+
+已知人物列表（供参考；不要将事件与人物的关系作为事件属性）：
+{character_list_json}
+
+任务要求：
+1. 为每个事件赋予唯一ID（如 `evt_001`）。
+2. 提取以下内在属性（如果文中明确）：
+   - 时间（精确或相对时间，如「芒种节」）
+   - 地点（如「大观园沁芳闸桥边」）
+   - 章回
+   - 摘要（一两句话概括事件过程）
+   - 起因
+   - 结果
+3. 事件参与人物不放在属性里，后续由关系边处理。
+4. 事件划分以「情节转折点或人物交互的完整片段」为最小单元，避免过于细碎（单独一个动作不必独立成事件）。
+
+输出格式：严格输出 JSON 数组，每个元素为一个事件对象：
+[
+  {{
+    "id": "evt_001",
+    "name": "黛玉葬花",
+    "attributes": {{
+      "时间": "芒种节",
+      "地点": "大观园沁芳闸桥边",
+      "章回": "第27回",
+      "摘要": "黛玉在花冢前哭泣，吟诵葬花词，宝玉听后感慨。",
+      "起因": "黛玉误会宝玉不见她",
+      "结果": "二人感情更深"
+    }}
+  }}
+]
+无事件则输出 []。""",
+        "temperature": 0.3,
+        "max_tokens": 2400,
+    },
+    {
+        "key": "kg.participation",
+        "category": "kg",
+        "name": "人物-事件参与关系",
+        "description": "Phase 3: 提取人物参与事件的关系边，附角色与具体行为。",
+        "system_prompt": (
+            "你是一名小说知识图谱构建专家，根据文本中已经识别出的人物与事件实体，"
+            "提取「人物参与事件」的关系边，并附上参与的角色与具体行为。"
+            "事件本身的时间/地点等属性不放在边上。"
+            "请严格输出 JSON 数组，不要输出解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """你是小说知识图谱构建专家。请根据文本，提取**人物参与事件**的关系，并给出参与的具体角色和行为。
+
+输入文本：
+{chunk_text}
+
+已抽取人物实体：
+{character_list_json}
+
+已抽取事件实体：
+{event_list_json}
+
+任务要求：
+1. 识别文本中明确描述的人物参与某个事件的关系。
+2. 关系固定为 `PARTICIPATES_IN`。
+3. 在关系上可附 `角色`（如「发起者」「受害者」「见证者」）和 `具体行为`。
+4. 多人参与同一事件，每个参与关系单独输出一条。
+5. 不得将事件的时间、地点等内在属性作为关系属性。
+
+输出格式：严格输出 JSON 数组，每条关系一个对象：
+[
+  {{
+    "source": "char_001",
+    "relation": "PARTICIPATES_IN",
+    "target": "evt_001",
+    "properties": {{
+      "角色": "发起者",
+      "具体行为": "吟诵葬花词"
+    }}
+  }}
+]
+无关系则输出 []。""",
+        "temperature": 0.3,
+        "max_tokens": 2400,
+    },
+    {
+        "key": "kg.char_relation",
+        "category": "kg",
+        "name": "人物间长期关系",
+        "description": "Phase 4: 抽取不依赖单一事件的人物长期关系。",
+        "system_prompt": (
+            "你是一名小说知识图谱构建专家，提取不依赖于单一事件的人物间长期关系"
+            "（亲属、社交、情感、敌对、主仆等）。这些关系是直接连接两个人物实体的边。"
+            "请严格输出 JSON 数组，不要输出解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """你是小说知识图谱构建专家。请提取**不依赖于单一事件**的人物间长期关系（亲属、社交、情感等）。这些关系直接连接人物实体。
+
+输入文本：
+{chunk_text}
+
+已知人物列表：
+{character_list_json}
+
+任务要求：
+1. 识别人物之间的长期关系，例如：
+   - 亲属：父亲、母亲、哥哥、表妹等
+   - 社交：朋友、同僚、恩人
+   - 情感：恋人、倾慕、厌恶
+   - 社会关系：主子与仆从、师生等
+2. 关系标签使用简洁的动词或名词（如 `父亲`、`丫鬟`、`倾慕`）。
+3. 一条关系只涉及两个人物，方向从主动到被动或从长辈到晚辈，需保持一致。
+
+输出格式：严格输出 JSON 数组，每条关系一个对象：
+[
+  {{ "source": "char_003", "relation": "父亲", "target": "char_001" }},
+  {{ "source": "char_005", "relation": "表妹", "target": "char_001" }}
+]
+无关系则输出 []。""",
+        "temperature": 0.3,
+        "max_tokens": 2400,
+    },
+    {
+        "key": "kg.event_relation",
+        "category": "kg",
+        "name": "事件间包含 / 因果关系",
+        "description": "Phase 5: 抽取事件之间的「包含」或「导致」关系。",
+        "system_prompt": (
+            "你是一名小说知识图谱构建专家，根据已知事件列表，识别事件之间的「包含」或「导致」关系。"
+            "大事件指向子事件用「包含」；原因事件指向结果事件用「导致」。"
+            "请严格输出 JSON 数组，不要输出解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """你是小说知识图谱构建专家。请根据文本，识别事件之间的**包含**或**因果**关系。
+
+输入文本：
+{chunk_text}
+
+已知事件列表：
+{event_list_json}
+
+任务要求：
+1. 若一个事件是另一个事件的子事件（如「抄检大观园」包含「司棋被逐」），使用关系 `包含`。
+2. 若一个事件直接导致另一个事件，使用关系 `导致`。
+3. 方向严格遵循：大事件指向小事件为 `包含`，因事件指向果事件为 `导致`。
+
+输出格式：严格输出 JSON 数组，每条关系一个对象：
+[
+  {{ "source": "evt_010", "relation": "包含", "target": "evt_011" }}
+]
+无则 []。""",
+        "temperature": 0.3,
+        "max_tokens": 2400,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# CRUD helpers
+# ---------------------------------------------------------------------------
+
+async def seed_default_prompts() -> None:
+    """Insert default templates if the table is empty (first run)."""
+    async with get_db() as db:
+        cur = await db.execute("SELECT COUNT(*) AS c FROM prompt_templates")
+        row = await cur.fetchone()
+        existing = row[0] if row else 0
+        if existing > 0:
+            return
+        for tmpl in DEFAULT_PROMPTS:
+            await db.execute(
+                """
+                INSERT INTO prompt_templates
+                    (key, name, category, description, system_prompt,
+                     user_prompt_template, temperature, max_tokens,
+                     is_builtin, is_enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+                """,
+                (
+                    tmpl["key"],
+                    tmpl["name"],
+                    tmpl["category"],
+                    tmpl.get("description") or "",
+                    tmpl.get("system_prompt", ""),
+                    tmpl.get("user_prompt_template", ""),
+                    float(tmpl.get("temperature", 0.3)),
+                    int(tmpl.get("max_tokens", 2400)),
+                ),
+            )
+        await db.commit()
+        logger.info("Seeded %d default prompt templates", len(DEFAULT_PROMPTS))
+
+
+def _row_to_dict(row) -> Dict[str, Any]:
+    data = dict(row)
+    return data
+
+
+async def list_prompts(category: Optional[str] = None) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        if category:
+            cur = await db.execute(
+                """
+                SELECT * FROM prompt_templates
+                WHERE category = ?
+                ORDER BY category, id
+                """,
+                (category,),
+            )
+        else:
+            cur = await db.execute(
+                "SELECT * FROM prompt_templates ORDER BY category, id"
+            )
+        rows = await cur.fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+
+async def get_prompt(prompt_id: int) -> Optional[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM prompt_templates WHERE id = ?", (prompt_id,)
+        )
+        row = await cur.fetchone()
+        return _row_to_dict(row) if row else None
+
+
+async def get_prompt_by_key(key: str) -> Optional[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM prompt_templates WHERE key = ?", (key,)
+        )
+        row = await cur.fetchone()
+        return _row_to_dict(row) if row else None
+
+
+async def get_active_prompt_by_key(key: str) -> Optional[Dict[str, Any]]:
+    """Return the prompt template if it is enabled, else None."""
+    prompt = await get_prompt_by_key(key)
+    if not prompt:
+        return None
+    if not int(prompt.get("is_enabled", 1)):
+        return None
+    return prompt
+
+
+async def update_prompt(
+    prompt_id: int,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    user_prompt_template: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    is_enabled: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    existing = await get_prompt(prompt_id)
+    if not existing:
+        return None
+
+    fields: List[str] = []
+    values: List[Any] = []
+    if name is not None:
+        fields.append("name = ?")
+        values.append(name)
+    if description is not None:
+        fields.append("description = ?")
+        values.append(description)
+    if system_prompt is not None:
+        fields.append("system_prompt = ?")
+        values.append(system_prompt)
+    if user_prompt_template is not None:
+        fields.append("user_prompt_template = ?")
+        values.append(user_prompt_template)
+    if temperature is not None:
+        fields.append("temperature = ?")
+        values.append(float(temperature))
+    if max_tokens is not None:
+        fields.append("max_tokens = ?")
+        values.append(int(max_tokens))
+    if is_enabled is not None:
+        fields.append("is_enabled = ?")
+        values.append(int(bool(is_enabled)))
+    if not fields:
+        return existing
+    fields.append("updated_at = CURRENT_TIMESTAMP")
+    values.append(prompt_id)
+    async with get_db() as db:
+        await db.execute(
+            f"UPDATE prompt_templates SET {', '.join(fields)} WHERE id = ?",
+            values,
+        )
+        await db.commit()
+    return await get_prompt(prompt_id)
+
+
+async def reset_prompt(prompt_id: int) -> Optional[Dict[str, Any]]:
+    """Reset a built-in template to its bundled default value."""
+    existing = await get_prompt(prompt_id)
+    if not existing:
+        return None
+    default = next((d for d in DEFAULT_PROMPTS if d["key"] == existing["key"]), None)
+    if not default:
+        # User-created prompt without a default -> just clear overrides.
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE prompt_templates SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (prompt_id,),
+            )
+            await db.commit()
+        return await get_prompt(prompt_id)
+    async with get_db() as db:
+        await db.execute(
+            """
+            UPDATE prompt_templates SET
+                name = ?,
+                description = ?,
+                system_prompt = ?,
+                user_prompt_template = ?,
+                temperature = ?,
+                max_tokens = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                default["name"],
+                default.get("description") or "",
+                default.get("system_prompt", ""),
+                default.get("user_prompt_template", ""),
+                float(default.get("temperature", 0.3)),
+                int(default.get("max_tokens", 2400)),
+                prompt_id,
+            ),
+        )
+        await db.commit()
+    return await get_prompt(prompt_id)
+
+
+async def create_prompt(
+    *,
+    key: str,
+    name: str,
+    category: str,
+    description: str = "",
+    system_prompt: str = "",
+    user_prompt_template: str = "",
+    temperature: float = 0.3,
+    max_tokens: int = 2400,
+    is_enabled: bool = True,
+) -> Dict[str, Any]:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            INSERT INTO prompt_templates
+                (key, name, category, description, system_prompt,
+                 user_prompt_template, temperature, max_tokens,
+                 is_builtin, is_enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            """,
+            (
+                key,
+                name,
+                category,
+                description,
+                system_prompt,
+                user_prompt_template,
+                float(temperature),
+                int(max_tokens),
+                1 if is_enabled else 0,
+            ),
+        )
+        await db.commit()
+        new_id = cur.lastrowid or 0
+    prompt = await get_prompt(new_id)
+    assert prompt is not None
+    return prompt
+
+
+async def delete_prompt(prompt_id: int) -> bool:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT is_builtin FROM prompt_templates WHERE id = ?", (prompt_id,)
+        )
+        row = await cur.fetchone()
+        if not row:
+            return False
+        if int(row[0] or 0):
+            # Built-in prompts are protected from deletion.
+            return False
+        await db.execute("DELETE FROM prompt_templates WHERE id = ?", (prompt_id,))
+        await db.commit()
+    return True
+
+
+def get_default_prompt(key: str) -> Optional[Dict[str, Any]]:
+    """Return the bundled default template for a key (read-only)."""
+    for tmpl in DEFAULT_PROMPTS:
+        if tmpl["key"] == key:
+            return dict(tmpl)
+    return None

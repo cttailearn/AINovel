@@ -1,0 +1,650 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError, api } from '../api/client.js';
+import { useToast } from './Toast/ToastProvider.jsx';
+import { KnowledgeGraphVisualizer } from './KnowledgeGraphVisualizer.jsx';
+import { EntityDetailModal } from './EntityDetailModal.jsx';
+import { ExtractionProgress } from './ExtractionProgress.jsx';
+
+function ModelSelect({ models, value, onChange, disabled }) {
+  const enabledModels = models.filter((m) => m.enabled);
+  if (enabledModels.length === 0) {
+    return (
+      <div className="model-empty">
+        请先在「系统设置」中启用至少一个 AI 模型
+      </div>
+    );
+  }
+  return (
+    <select value={value || ''} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
+      <option value="">使用默认模型</option>
+      {enabledModels.map((m) => (
+        <option key={m.id} value={m.id}>
+          {m.name || m.provider} · {m.model_name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function renderAttrs(attrs, max = 4) {
+  const entries = Object.entries(attrs || {}).slice(0, max);
+  if (entries.length === 0) return null;
+  return (
+    <ul className="kg-attr-list">
+      {entries.map(([k, v]) => (
+        <li key={k}>
+          <span className="kg-attr-key">{k}</span>
+          <span className="kg-attr-val">
+            {Array.isArray(v) ? v.join('、') : String(v)}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function CharacterCard({ character, index, onClick }) {
+  const initial = (character.name || '?').slice(0, 1);
+  return (
+    <article
+      className="character-card"
+      onClick={() => onClick?.(character)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onClick?.(character);
+      }}
+    >
+      <div className="character-avatar" aria-hidden>
+        {initial}
+      </div>
+      <div className="character-body">
+        <header>
+          <h4>{character.name}</h4>
+          <span className="character-role">{character.entity_id}</span>
+        </header>
+        {renderAttrs(character.attributes)}
+      </div>
+      <span className="character-index">#{index + 1}</span>
+    </article>
+  );
+}
+
+function EventCard({ event, index, onClick }) {
+  return (
+    <article
+      className="event-card"
+      onClick={() => onClick?.(event)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onClick?.(event);
+      }}
+    >
+      <div className="event-head">
+        <h4>{event.name}</h4>
+        <span className="event-entity-id">{event.entity_id}</span>
+      </div>
+      {renderAttrs(event.attributes)}
+      <span className="event-index">#{index + 1}</span>
+    </article>
+  );
+}
+
+function RelationRow({ relation, kind, entityMap, onClick }) {
+  const sourceName = entityMap[relation.source] || relation.source;
+  const targetName = entityMap[relation.target] || relation.target;
+  const extra =
+    relation.role || relation.action
+      ? `（${[relation.role, relation.action].filter(Boolean).join(' · ')}）`
+      : '';
+  return (
+    <li
+      className={`kg-rel-row kg-rel-${kind}`}
+      onClick={() => onClick?.(relation)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onClick?.(relation);
+      }}
+    >
+      <span className="kg-rel-side">{sourceName}</span>
+      <span className="kg-rel-tag">{relation.relation}</span>
+      <span className="kg-rel-side">{targetName}</span>
+      {extra && <span className="kg-rel-extra">{extra}</span>}
+    </li>
+  );
+}
+
+const TABS = [
+  { key: 'graph', label: '图谱视图' },
+  { key: 'characters', label: '人物' },
+  { key: 'events', label: '事件' },
+  { key: 'relations', label: '关系' },
+];
+
+export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }) {
+  const toast = useToast();
+  const [data, setData] = useState({
+    characters: [],
+    events: [],
+    character_event_relations: [],
+    character_relations: [],
+    event_relations: [],
+  });
+  const [loading, setLoading] = useState(true);
+  const [extracting, setExtracting] = useState(false);
+  const [modelConfigId, setModelConfigId] = useState('');
+  const [chunkSize, setChunkSize] = useState(8000);
+  const [maxConcurrency, setMaxConcurrency] = useState(3);
+  const [lastModel, setLastModel] = useState(null);
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [activeTab, setActiveTab] = useState('graph');
+  const [relSubTab, setRelSubTab] = useState('participations');
+
+  // Streaming / live updates
+  const [progress, setProgress] = useState(null);
+  const [phaseStats, setPhaseStats] = useState({});
+  const [extractError, setExtractError] = useState(null);
+  const [extractStatus, setExtractStatus] = useState('idle'); // idle|running|done|error
+  const abortRef = useRef(null);
+  // Hold a snapshot of the live data while the extraction is running
+  // (before the final result is stored in the DB).
+  const [liveData, setLiveData] = useState(null);
+
+  // Entity detail modal
+  const [detailSelection, setDetailSelection] = useState(null);
+
+  const enabledModels = models.filter((m) => m.enabled);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const kg = await api.novels.listCharacters(novelId);
+        if (cancelled) return;
+        setData({
+          characters: kg.characters || [],
+          events: kg.events || [],
+          character_event_relations: kg.character_event_relations || [],
+          character_relations: kg.character_relations || [],
+          event_relations: kg.event_relations || [],
+        });
+      } catch (err) {
+        if (!cancelled) {
+          toast.error(err instanceof ApiError ? err.message : '加载知识图谱失败');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [novelId, toast]);
+
+  useEffect(() => () => {
+    abortRef.current?.abort?.();
+  }, []);
+
+  const handleExtract = async () => {
+    if (enabledModels.length === 0) {
+      toast.error('请先在「系统设置」中启用模型');
+      return;
+    }
+    // Reset state
+    setExtractStatus('running');
+    setProgress({ percent: 0, message: '准备开始…' });
+    setPhaseStats({});
+    setExtractError(null);
+    setLiveData({
+      characters: [],
+      events: [],
+      character_event_relations: [],
+      character_relations: [],
+      event_relations: [],
+    });
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setExtracting(true);
+
+    try {
+      await api.novels.extractCharactersStream(
+        novelId,
+        {
+          model_config_id: modelConfigId ? Number(modelConfigId) : null,
+          chunk_size: Number(chunkSize),
+          max_concurrency: Number(maxConcurrency),
+        },
+        {
+          signal: controller.signal,
+          onEvent: ({ event, data }) => {
+            if (event === 'progress') {
+              setProgress(data);
+            } else if (event === 'partial') {
+              const key = Object.keys(data || {})[0];
+              if (!key) return;
+              const items = data[key] || [];
+              setLiveData((prev) => {
+                const next = { ...(prev || {}) };
+                if (key === 'characters') next.characters = items;
+                else if (key === 'events') next.events = items;
+                else if (key === 'participations') next.character_event_relations = items;
+                else if (key === 'char_relations') next.character_relations = items;
+                else if (key === 'event_relations') next.event_relations = items;
+                return next;
+              });
+              // Also surface running count in phase stats during partials
+              // (so the progress UI shows growing numbers as work proceeds).
+              if (
+                data[key]?.length !== undefined &&
+                ['characters', 'events'].includes(key)
+              ) {
+                setPhaseStats((prev) => ({
+                  ...prev,
+                  [key]: { count: data[key].length, partial: true },
+                }));
+              }
+            } else if (event === 'done') {
+              // Final result includes stored entities with `entity_id`.
+              const result = data || {};
+              setData({
+                characters: result.characters || [],
+                events: result.events || [],
+                character_event_relations: result.character_event_relations || [],
+                character_relations: result.character_relations || [],
+                event_relations: result.event_relations || [],
+              });
+              const stats = result.stats || {};
+              setPhaseStats({
+                characters: { count: stats.characters || 0 },
+                events: { count: stats.events || 0 },
+                participations: { count: stats.participations || 0 },
+                char_relations: { count: stats.character_relations || 0 },
+                event_relations: { count: stats.event_relations || 0 },
+              });
+              setLastModel(result.model || null);
+              setUpdatedAt(new Date().toLocaleTimeString());
+              setProgress({ percent: 100, message: '构建完成' });
+              setExtractStatus('done');
+              toast.success(
+                `抽取完成：${stats.characters || 0} 位人物、${stats.events || 0} 个事件`
+              );
+              setLiveData(null);
+              onExtracted?.();
+            } else if (event === 'error') {
+              setExtractError(typeof data === 'string' ? data : '抽取失败');
+              setExtractStatus('error');
+              toast.error(typeof data === 'string' ? data : '知识图谱构建失败');
+            }
+          },
+        }
+      );
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        setExtractStatus('idle');
+        setProgress(null);
+        toast.info('已取消');
+        return;
+      }
+      const message = err instanceof ApiError ? err.message : '知识图谱构建失败';
+      setExtractError(message);
+      setExtractStatus('error');
+      toast.error(message);
+    } finally {
+      setExtracting(false);
+      abortRef.current = null;
+    }
+  };
+
+  const handleCancel = () => {
+    abortRef.current?.abort();
+  };
+
+  // During streaming we render `liveData` (so the user sees entities
+  // appear as they're extracted). After completion we render `data`.
+  const renderData = useMemo(() => {
+    if (extractStatus === 'running' && liveData) {
+      // Merge in any data already persisted from previous runs.
+      return {
+        characters: liveData.characters?.length ? liveData.characters : data.characters,
+        events: liveData.events?.length ? liveData.events : data.events,
+        character_event_relations: liveData.character_event_relations?.length
+          ? liveData.character_event_relations
+          : data.character_event_relations,
+        character_relations: liveData.character_relations?.length
+          ? liveData.character_relations
+          : data.character_relations,
+        event_relations: liveData.event_relations?.length
+          ? liveData.event_relations
+          : data.event_relations,
+      };
+    }
+    return data;
+  }, [extractStatus, liveData, data]);
+
+  const handleSelectCharacter = useCallback((c) => {
+    setDetailSelection({ type: 'character', entity: c });
+  }, []);
+  const handleSelectEvent = useCallback((e) => {
+    setDetailSelection({ type: 'event', entity: e });
+  }, []);
+  const handleSelectRelation = useCallback((r) => {
+    setDetailSelection({ type: 'relation', relation: r });
+  }, []);
+  const handleSelectGraphNode = useCallback((node) => {
+    if (!node) return;
+    if (node.type === 'character') {
+      // Try to use the latest data version of the character
+      const fresh = data.characters.find((c) => c.entity_id === node.entity_id);
+      setDetailSelection({ type: 'character', entity: fresh || node });
+    } else if (node.type === 'event') {
+      const fresh = data.events.find((e) => e.entity_id === node.entity_id);
+      setDetailSelection({ type: 'event', entity: fresh || node });
+    }
+  }, [data.characters, data.events]);
+
+  const entityMap = useMemo(() => {
+    const m = {};
+    renderData.characters.forEach((c) => {
+      if (c.entity_id) m[c.entity_id] = c.name;
+    });
+    renderData.events.forEach((e) => {
+      if (e.entity_id) m[e.entity_id] = e.name;
+    });
+    return m;
+  }, [renderData.characters, renderData.events]);
+
+  const counts = useMemo(
+    () => ({
+      characters: renderData.characters.length,
+      events: renderData.events.length,
+      participations: renderData.character_event_relations.length,
+      character_relations: renderData.character_relations.length,
+      event_relations: renderData.event_relations.length,
+    }),
+    [renderData]
+  );
+
+  const isEmpty =
+    counts.characters === 0 &&
+    counts.events === 0 &&
+    counts.participations === 0 &&
+    counts.character_relations === 0 &&
+    counts.event_relations === 0;
+
+  return (
+    <div className="character-panel kg-panel">
+      <div className="character-toolbar">
+        <div className="toolbar-field">
+          <label>AI 模型</label>
+          <ModelSelect
+            models={models}
+            value={modelConfigId}
+            onChange={setModelConfigId}
+            disabled={extracting}
+          />
+        </div>
+        <div className="toolbar-field small">
+          <label>分块大小</label>
+          <select
+            value={chunkSize}
+            onChange={(e) => setChunkSize(Number(e.target.value))}
+            disabled={extracting}
+          >
+            <option value={4000}>4000 字</option>
+            <option value={8000}>8000 字</option>
+            <option value={16000}>16000 字</option>
+            <option value={32000}>32000 字</option>
+          </select>
+        </div>
+        <div className="toolbar-field small">
+          <label>并发数</label>
+          <input
+            type="number"
+            min={1}
+            max={10}
+            value={maxConcurrency}
+            onChange={(e) => setMaxConcurrency(Number(e.target.value) || 1)}
+            disabled={extracting}
+          />
+        </div>
+        <button
+          type="button"
+          className="extract-btn"
+          onClick={handleExtract}
+          disabled={extracting || enabledModels.length === 0}
+        >
+          {extracting ? (
+            <>
+              <span className="loading-spinner small"></span>
+              构建中...
+            </>
+          ) : (
+            <>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
+                <circle cx="4" cy="6" r="2" stroke="currentColor" strokeWidth="2" />
+                <circle cx="20" cy="6" r="2" stroke="currentColor" strokeWidth="2" />
+                <circle cx="4" cy="18" r="2" stroke="currentColor" strokeWidth="2" />
+                <circle cx="20" cy="18" r="2" stroke="currentColor" strokeWidth="2" />
+                <path d="M6 6l4 4M18 6l-4 4M6 18l4-4M18 18l-4-4" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
+              构建知识图谱
+            </>
+          )}
+        </button>
+      </div>
+
+      <div className="character-summary kg-summary">
+        <div>
+          <span className="summary-label">人物</span>
+          <strong>{counts.characters}</strong>
+        </div>
+        <div>
+          <span className="summary-label">事件</span>
+          <strong>{counts.events}</strong>
+        </div>
+        <div>
+          <span className="summary-label">参与</span>
+          <strong>{counts.participations}</strong>
+        </div>
+        <div>
+          <span className="summary-label">人物关系</span>
+          <strong>{counts.character_relations}</strong>
+        </div>
+        <div>
+          <span className="summary-label">事件关系</span>
+          <strong>{counts.event_relations}</strong>
+        </div>
+        {lastModel && (
+          <div className="summary-sub">
+            <span>使用模型：</span>
+            <strong>{lastModel}</strong>
+          </div>
+        )}
+        {updatedAt && <div className="summary-sub">更新于 {updatedAt}</div>}
+      </div>
+
+      <ExtractionProgress
+        status={extractStatus}
+        progress={progress}
+        phaseStats={phaseStats}
+        error={extractError}
+        onCancel={handleCancel}
+      />
+
+      <div className="kg-tabs">
+        {TABS.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            className={`kg-tab ${activeTab === tab.key ? 'active' : ''}`}
+            onClick={() => setActiveTab(tab.key)}
+          >
+            {tab.label}
+            {tab.key === 'graph' && (
+              <span className="kg-tab-count">
+                {counts.characters + counts.events}
+              </span>
+            )}
+            {tab.key === 'characters' && <span className="kg-tab-count">{counts.characters}</span>}
+            {tab.key === 'events' && <span className="kg-tab-count">{counts.events}</span>}
+            {tab.key === 'relations' && (
+              <span className="kg-tab-count">
+                {counts.participations + counts.character_relations + counts.event_relations}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {loading ? (
+        <div className="loading-block">
+          <div className="loading-spinner large"></div>
+          <p>加载知识图谱...</p>
+        </div>
+      ) : activeTab === 'graph' ? (
+        <div className="kg-graph-container">
+          {isEmpty ? (
+            <div className="character-empty">
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
+                <circle cx="4" cy="6" r="2" stroke="currentColor" strokeWidth="2" />
+                <circle cx="20" cy="6" r="2" stroke="currentColor" strokeWidth="2" />
+                <circle cx="4" cy="18" r="2" stroke="currentColor" strokeWidth="2" />
+                <circle cx="20" cy="18" r="2" stroke="currentColor" strokeWidth="2" />
+                <path d="M6 6l4 4M18 6l-4 4M6 18l4-4M18 18l-4-4" stroke="currentColor" strokeWidth="1.5" />
+              </svg>
+              <p>「{novelTitle}」暂无知识图谱</p>
+              <span>点击「构建知识图谱」让 AI 抽取人物、事件与关系</span>
+            </div>
+          ) : (
+            <KnowledgeGraphVisualizer
+              data={renderData}
+              onSelectNode={handleSelectGraphNode}
+              onSelectEdge={handleSelectRelation}
+              height={520}
+            />
+          )}
+        </div>
+      ) : isEmpty ? (
+        <div className="character-empty">
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
+            <circle cx="4" cy="6" r="2" stroke="currentColor" strokeWidth="2" />
+            <circle cx="20" cy="6" r="2" stroke="currentColor" strokeWidth="2" />
+            <circle cx="4" cy="18" r="2" stroke="currentColor" strokeWidth="2" />
+            <circle cx="20" cy="18" r="2" stroke="currentColor" strokeWidth="2" />
+            <path d="M6 6l4 4M18 6l-4 4M6 18l4-4M18 18l-4-4" stroke="currentColor" strokeWidth="1.5" />
+          </svg>
+          <p>「{novelTitle}」暂无知识图谱</p>
+          <span>点击「构建知识图谱」让 AI 抽取人物、事件与关系</span>
+        </div>
+      ) : activeTab === 'characters' ? (
+        <div className="character-grid">
+          {renderData.characters.map((c, i) => (
+            <CharacterCard
+              key={c.entity_id || c.id || c.name}
+              character={c}
+              index={i}
+              onClick={handleSelectCharacter}
+            />
+          ))}
+        </div>
+      ) : activeTab === 'events' ? (
+        <div className="event-grid">
+          {renderData.events.map((e, i) => (
+            <EventCard
+              key={e.entity_id || e.id || e.name}
+              event={e}
+              index={i}
+              onClick={handleSelectEvent}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="kg-rel-block">
+          <div className="kg-rel-subtabs">
+            <button
+              type="button"
+              className={`kg-rel-subtab ${relSubTab === 'participations' ? 'active' : ''}`}
+              onClick={() => setRelSubTab('participations')}
+            >
+              人物 → 事件
+              <span className="kg-tab-count">{counts.participations}</span>
+            </button>
+            <button
+              type="button"
+              className={`kg-rel-subtab ${relSubTab === 'char_char' ? 'active' : ''}`}
+              onClick={() => setRelSubTab('char_char')}
+            >
+              人物 ↔ 人物
+              <span className="kg-tab-count">{counts.character_relations}</span>
+            </button>
+            <button
+              type="button"
+              className={`kg-rel-subtab ${relSubTab === 'event_event' ? 'active' : ''}`}
+              onClick={() => setRelSubTab('event_event')}
+            >
+              事件 → 事件
+              <span className="kg-tab-count">{counts.event_relations}</span>
+            </button>
+          </div>
+          <ul className="kg-rel-list">
+            {relSubTab === 'participations' &&
+              renderData.character_event_relations.map((r, i) => (
+                <RelationRow
+                  key={`p-${i}`}
+                  relation={r}
+                  kind="ce"
+                  entityMap={entityMap}
+                  onClick={handleSelectRelation}
+                />
+              ))}
+            {relSubTab === 'char_char' &&
+              renderData.character_relations.map((r, i) => (
+                <RelationRow
+                  key={`cc-${i}`}
+                  relation={r}
+                  kind="cc"
+                  entityMap={entityMap}
+                  onClick={handleSelectRelation}
+                />
+              ))}
+            {relSubTab === 'event_event' &&
+              renderData.event_relations.map((r, i) => (
+                <RelationRow
+                  key={`ee-${i}`}
+                  relation={r}
+                  kind="ee"
+                  entityMap={entityMap}
+                  onClick={handleSelectRelation}
+                />
+              ))}
+            {relSubTab === 'participations' && renderData.character_event_relations.length === 0 && (
+              <li className="kg-rel-empty">暂无人物参与事件的关系</li>
+            )}
+            {relSubTab === 'char_char' && renderData.character_relations.length === 0 && (
+              <li className="kg-rel-empty">暂无人物间长期关系</li>
+            )}
+            {relSubTab === 'event_event' && renderData.event_relations.length === 0 && (
+              <li className="kg-rel-empty">暂无事件间关系</li>
+            )}
+          </ul>
+        </div>
+      )}
+
+      <EntityDetailModal
+        open={!!detailSelection}
+        onClose={() => setDetailSelection(null)}
+        data={data}
+        selection={detailSelection}
+        onSelectNode={(sel) => setDetailSelection(sel)}
+      />
+    </div>
+  );
+}

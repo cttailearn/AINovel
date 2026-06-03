@@ -83,13 +83,16 @@ def _build_summary(content: bytes, max_len: int = 140) -> str:
     except Exception:
         return ""
     pieces: List[str] = []
+    # 元数据标签：仅在「行首是标签 + 紧跟冒号」时跳过，
+    # 避免把正文里出现的"书名/作者"等字样误删。
+    meta_re = re.compile(
+        r"^\s*(?:书\s*名|title|作\s*者|author)\s*[:：]"
+    )
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
-        if ("书名" in stripped or "作者" in stripped) and (
-            ":" in stripped or "：" in stripped
-        ):
+        if meta_re.match(stripped):
             continue
         pieces.append(stripped)
         if sum(len(p) for p in pieces) >= max_len:
@@ -149,7 +152,9 @@ def parse_with_fixed_size(content: str, chunk_size: int) -> List[Chapter]:
             return
         chapter_no += 1
         text = "\n".join(buffer).strip()
-        title = text[:30] + ("..." if len(text) > 30 else "")
+        # 标题包含段号 + 前若干字，便于在目录中区分
+        snippet = text[:30].replace("\n", " ")
+        title = f"第{chapter_no}段 {snippet}{'...' if len(text) > 30 else ''}"
         chapters.append(
             Chapter(
                 chapter_number=chapter_no,

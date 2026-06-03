@@ -41,7 +41,8 @@ function NovelReader({ novelId, onBack }) {
   const [showFindPanel, setShowFindPanel] = useState(false);
 
   const abortRef = useRef(null);
-  const textareaRef = useRef(null);
+  const contentScrollRef = useRef(null);
+  const [scrollRatio, setScrollRatio] = useState(0);
 
   useEffect(() => {
     abortRef.current?.abort?.();
@@ -98,13 +99,25 @@ function NovelReader({ novelId, onBack }) {
   useEffect(() => {
     const onKey = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      // 优先关闭打开的面板，再退到关闭阅读器
+      if (e.key === 'Escape') {
+        if (showFindPanel) {
+          setShowFindPanel(false);
+          return;
+        }
+        if (showSettings) {
+          setShowSettings(false);
+          return;
+        }
+        onBack?.();
+        return;
+      }
       if (e.key === 'ArrowLeft') setCurrentIndex((i) => Math.max(0, i - 1));
       if (e.key === 'ArrowRight') setCurrentIndex((i) => Math.min(chapters.length - 1, i + 1));
-      if (e.key === 'Escape') onBack?.();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [chapters.length, onBack]);
+  }, [chapters.length, onBack, showFindPanel, showSettings]);
 
   const handlePresetChange = (index) => {
     const preset = READING_PRESETS[index];
@@ -167,10 +180,16 @@ function NovelReader({ novelId, onBack }) {
 
   const scrollToResult = (index) => {
     setCurrentResultIndex(index);
-    if (!textareaRef.current) return;
+    const container = contentScrollRef.current;
+    if (!container) return;
     const result = findResults[index];
-    textareaRef.current.focus();
-    textareaRef.current.setSelectionRange(result.index, result.index + result.length);
+    if (!result) return;
+    // 估算匹配位置对应的滚动偏移
+    const totalLength = content.length || 1;
+    const ratio = result.index / totalLength;
+    // 让匹配位置落在视口上部约 30% 处
+    const targetTop = container.scrollHeight * ratio - container.clientHeight * 0.3;
+    container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
   };
 
   const styles = useMemo(
@@ -185,6 +204,18 @@ function NovelReader({ novelId, onBack }) {
     }),
     [background, textColor, fontSize, lineHeight, letterSpacing, sidebarBg, sidebarColor]
   );
+
+  // 章节字数与预估阅读时长（中文按 400 字/分钟）
+  const contentLength = useMemo(() => {
+    if (!content) return 0;
+    // 去除空白字符后按字符数统计
+    return content.replace(/\s+/g, '').length;
+  }, [content]);
+
+  const readMinutes = useMemo(() => {
+    if (!contentLength) return 0;
+    return Math.max(1, Math.round(contentLength / 400));
+  }, [contentLength]);
 
   if (loading) {
     return (
@@ -211,10 +242,18 @@ function NovelReader({ novelId, onBack }) {
       <div className="reader-toolbar">
         <button className="toolbar-btn back-btn" type="button" onClick={onBack} title="返回">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-            <path d="M19 12H5M12 19l-7-7 7-7" stroke="currentColor" strokeWidth="2" />
+            <path d="M19 12H5M12 19l-7-7 7-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
-        <span className="reader-title">{novel.title}</span>
+        <div className="toolbar-title-block">
+          <span className="reader-title">{novel.title}</span>
+          <span className="reader-subtitle">
+            {chapters[currentIndex]?.title || ''}
+          </span>
+        </div>
+        <div className="toolbar-progress" aria-hidden="true">
+          <div className="toolbar-progress-fill" style={{ width: `${Math.round(scrollRatio * 100)}%` }} />
+        </div>
         <div className="toolbar-actions">
           <button
             className={`toolbar-btn ${showFindPanel ? 'active' : ''}`}
@@ -224,7 +263,7 @@ function NovelReader({ novelId, onBack }) {
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
               <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
-              <path d="M21 21l-4-4" stroke="currentColor" strokeWidth="2" />
+              <path d="M21 21l-4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
           </button>
           <button
@@ -235,7 +274,7 @@ function NovelReader({ novelId, onBack }) {
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
               <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
-              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" strokeWidth="2" />
+              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
           </button>
         </div>
@@ -306,7 +345,10 @@ function NovelReader({ novelId, onBack }) {
               placeholder="查找内容（支持正则）"
               value={findText}
               onChange={(e) => setFindText(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleFind()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleFind();
+                if (e.key === 'Escape') setShowFindPanel(false);
+              }}
             />
             <button type="button" className="btn btn-primary" onClick={handleFind}>查找</button>
           </div>
@@ -386,64 +428,117 @@ function NovelReader({ novelId, onBack }) {
           {loadingChapter ? (
             <div className="content-loading">
               <div className="loading-spinner large"></div>
-              <p>加载中...</p>
+              <p>正在展开书页…</p>
             </div>
           ) : (
             <div
-              className="content-text"
-              style={{
-                fontSize: `${fontSize}px`,
-                lineHeight,
-                letterSpacing: `${letterSpacing}px`,
-                color: textColor,
-                background,
-                whiteSpace: 'pre-wrap',
+              className="content-scroll"
+              ref={contentScrollRef}
+              style={{ background }}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                const ratio = el.scrollHeight > el.clientHeight
+                  ? el.scrollTop / (el.scrollHeight - el.clientHeight)
+                  : 0;
+                setScrollRatio(ratio);
               }}
             >
-              <textarea
-                ref={textareaRef}
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                spellCheck={false}
-                style={{
-                  width: '100%',
-                  minHeight: '60vh',
-                  border: 'none',
-                  background: 'transparent',
-                  color: 'inherit',
-                  fontSize: 'inherit',
-                  lineHeight: 'inherit',
-                  letterSpacing: 'inherit',
-                  resize: 'vertical',
-                  outline: 'none',
-                  fontFamily: 'inherit',
-                }}
-              />
+              <article className="content-page">
+                <header className="content-header-block">
+                  <div className="content-eyebrow">
+                    <span className="eyebrow-line" />
+                    <span className="eyebrow-text">第 {chapters[currentIndex]?.chapter_number || currentIndex + 1} 章</span>
+                    <span className="eyebrow-line" />
+                  </div>
+                  <h1 className="content-chapter-title">
+                    {chapters[currentIndex]?.title || '无题'}
+                  </h1>
+                  <div className="content-meta">
+                    <span>{readMinutes > 0 ? `约 ${readMinutes} 分钟阅读` : '短章'}</span>
+                    <span className="meta-dot">·</span>
+                    <span>{contentLength.toLocaleString()} 字</span>
+                  </div>
+                  <div className="content-divider" aria-hidden="true">
+                    <span className="divider-ornament">❦</span>
+                  </div>
+                </header>
+
+                <div
+                  className="content-text"
+                  style={{
+                    fontSize: `${fontSize}px`,
+                    lineHeight,
+                    letterSpacing: `${letterSpacing}px`,
+                    color: textColor,
+                    whiteSpace: 'pre-wrap',
+                  }}
+                >
+                  {content}
+                </div>
+
+                <footer className="content-footer">
+                  <div className="content-divider" aria-hidden="true">
+                    <span className="divider-ornament">❦</span>
+                  </div>
+                  <div className="content-end">
+                    <span className="end-label">本章节完</span>
+                    {currentIndex < chapters.length - 1 ? (
+                      <button
+                        type="button"
+                        className="end-next-btn"
+                        onClick={() => setCurrentIndex((i) => Math.min(chapters.length - 1, i + 1))}
+                      >
+                        继续阅读下一章 →
+                      </button>
+                    ) : (
+                      <span className="end-final">您已抵达全卷之末 ✦</span>
+                    )}
+                  </div>
+                </footer>
+              </article>
             </div>
           )}
 
           <div className="reader-navigation">
-            <button
-              type="button"
-              className="nav-btn prev-btn"
-              onClick={() => setCurrentIndex((i) => Math.max(0, i - 1))}
-              disabled={currentIndex <= 0}
-            >
-              ← 上一章
-            </button>
-            <div className="chapter-progress">
-              <span>
-                {chapters.length === 0 ? 0 : currentIndex + 1} / {chapters.length}
-              </span>
+            <div className="nav-progress-track" aria-hidden="true">
+              <div
+                className="nav-progress-fill"
+                style={{
+                  width: chapters.length > 0
+                    ? `${((currentIndex + 1) / chapters.length) * 100}%`
+                    : '0%',
+                }}
+              />
             </div>
-            <button
-              type="button"
-              className="nav-btn next-btn"
-              onClick={() => setCurrentIndex((i) => Math.min(chapters.length - 1, i + 1))}
-              disabled={currentIndex >= chapters.length - 1}
-            >
-              下一章 →
-            </button>
+            <div className="nav-row">
+              <button
+                type="button"
+                className="nav-btn prev-btn"
+                onClick={() => setCurrentIndex((i) => Math.max(0, i - 1))}
+                disabled={currentIndex <= 0}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                <span>上一章</span>
+              </button>
+              <div className="chapter-progress">
+                <span className="progress-current">{chapters.length === 0 ? 0 : currentIndex + 1}</span>
+                <span className="progress-sep">/</span>
+                <span className="progress-total">{chapters.length}</span>
+              </div>
+              <button
+                type="button"
+                className="nav-btn next-btn"
+                onClick={() => setCurrentIndex((i) => Math.min(chapters.length - 1, i + 1))}
+                disabled={currentIndex >= chapters.length - 1}
+              >
+                <span>下一章</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -1,9 +1,15 @@
+import asyncio
+import os
+import tempfile
+
 import pytest
 
+from services import file_service
 from services.novel_service import (
     parse_with_fixed_size,
     parse_with_rule,
     ParseError,
+    _build_summary,
     _safe_filename,
     _read_metadata_from_header,
     _build_chapters_from_matches,
@@ -116,3 +122,82 @@ def test_build_chapters_from_matches_monotonic():
     assert [c.chapter_number for c in chapters] == [1, 2, 3]
     for i in range(1, len(chapters)):
         assert chapters[i].start_position > chapters[i - 1].start_position
+
+
+def test_read_text_slice_chinese_char_offsets():
+    """回归测试：start/end 是字符偏移，UTF-8 多字节字符不能按字节切。
+
+    修复前：f.seek(char_pos) 把字符偏移当字节偏移处理，中文小说章节
+    内容会出现 \\ufffd 替换字符。
+    """
+    async def _run():
+        text = (
+            "书名: 字符测试\n"
+            "作者: Tester\n"
+            "\n"
+            "第一章 开始\n"
+            "这是第一段中文内容。\n"
+            "\n"
+            "第二章 旅途\n"
+            "更多中文内容，讲述旅途见闻。\n"
+        )
+        char_start = text.index("第二章")
+        char_end = len(text)
+        with tempfile.NamedTemporaryFile(
+            "wb", suffix=".txt", delete=False
+        ) as f:
+            f.write(text.encode("utf-8"))
+            path = f.name
+        try:
+            content = await file_service.read_text_slice(
+                path, char_start, char_end
+            )
+            assert content.startswith("第二章"), (
+                f"期望以'第二章'开头，实际: {content[:30]!r}"
+            )
+            assert "旅途" in content
+            assert "见闻" in content
+            assert "\ufffd" not in content, "不应出现 Unicode 替换字符"
+        finally:
+            os.remove(path)
+
+    asyncio.run(_run())
+
+
+def test_parse_with_fixed_size_title_has_segment_number():
+    chapters = parse_with_fixed_size("段落一。" * 200, chunk_size=50)
+    assert len(chapters) >= 1
+    assert all(c.title.startswith("第") and "段" in c.title for c in chapters), (
+        f"标题应包含段号，实际: {[c.title for c in chapters]}"
+    )
+    # 段号应递增
+    numbers = [c.chapter_number for c in chapters]
+    assert numbers == sorted(numbers)
+    assert numbers[0] == 1
+
+
+def test_build_summary_does_not_filter_body_lines_with_keywords():
+    """正文里出现'书名'/'作者'字样时不应被当成元数据过滤掉。"""
+    text = (
+        "书名: 真的书名\n"
+        "作者: 真的作者\n"
+        "\n"
+        "故事情节里出现：'他高喊书名：张三是我的笔名'，"
+        "以及一段对话：'作者：今天要写点什么好呢？'。\n"
+    ).encode("utf-8")
+    summary = _build_summary(text)
+    assert "张三是我的笔名" in summary
+    assert "今天要写点什么好呢" in summary
+
+
+def test_build_summary_strips_real_metadata():
+    text = (
+        "title: Real Title\n"
+        "author: Real Author\n"
+        "\n"
+        "正文段落开始，描述故事背景。\n"
+    ).encode("utf-8")
+    summary = _build_summary(text)
+    assert "title:" not in summary
+    assert "author:" not in summary
+    assert "正文段落" in summary

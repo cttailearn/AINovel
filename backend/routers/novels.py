@@ -1,8 +1,11 @@
+import asyncio
+import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 
 from config import (
     ALLOWED_NOVEL_EXT,
@@ -12,8 +15,8 @@ from config import (
 )
 from schemas import (
     ChapterDetail,
-    CharacterExtractionRequest,
-    CharacterExtractionResponse,
+    KnowledgeGraphRequest,
+    KnowledgeGraphResponse,
     NovelDetail,
     NovelListResponse,
     NovelUpdate,
@@ -26,12 +29,13 @@ from schemas import (
 from services import (
     ParseError,
     delete_novel,
-    extract_characters,
+    extract_knowledge_graph,
+    extract_knowledge_graph_streaming,
     get_chapter,
     get_novel_detail,
     get_raw_content,
     list_all_novels,
-    list_characters,
+    list_knowledge_graph,
     parse_chapters_by_rule,
     parse_chapters_fixed_size,
     preview_chapters_by_rule,
@@ -180,43 +184,130 @@ async def get_raw_content_endpoint(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.get("/{novel_id}/characters")
-async def get_characters_endpoint(novel_id: int):
+@router.get("/{novel_id}/knowledge-graph")
+async def get_knowledge_graph_endpoint(novel_id: int):
     if not await get_novel_detail(novel_id):
         raise HTTPException(status_code=404, detail="小说不存在")
-    characters = await list_characters(novel_id)
-    return {"characters": characters}
+    return await list_knowledge_graph(novel_id)
+
+
+@router.get("/{novel_id}/kg-stats")
+async def get_kg_stats_endpoint(novel_id: int):
+    from database import get_kg_stats
+    if not await get_novel_detail(novel_id):
+        raise HTTPException(status_code=404, detail="小说不存在")
+    return await get_kg_stats(novel_id)
 
 
 @router.post(
-    "/{novel_id}/characters",
-    response_model=CharacterExtractionResponse,
+    "/{novel_id}/knowledge-graph",
+    response_model=KnowledgeGraphResponse,
 )
-async def extract_characters_endpoint(
-    novel_id: int, payload: CharacterExtractionRequest
+async def extract_knowledge_graph_endpoint(
+    novel_id: int, payload: KnowledgeGraphRequest
 ):
     if not await get_novel_detail(novel_id):
         raise HTTPException(status_code=404, detail="小说不存在")
     try:
-        result = await extract_characters(
+        result = await extract_knowledge_graph(
             novel_id,
             model_config_id=payload.model_config_id,
-            max_chars=payload.max_chars,
-            max_characters=payload.max_characters,
+            chunk_size=payload.chunk_size,
+            max_concurrency=payload.max_concurrency,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Character extraction failed: %s", exc)
-        raise HTTPException(status_code=500, detail="人物提取失败，请稍后重试")
-    characters = result["characters"]
-    return CharacterExtractionResponse(
+        logger.exception("Knowledge graph extraction failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="知识图谱构建失败，请稍后重试"
+        )
+    stats = result["stats"]
+    summary = (
+        f"抽取完成：{stats['characters']} 位人物、{stats['events']} 个事件、"
+        f"{stats['participations']} 条参与、{stats['character_relations']} 条人物关系、"
+        f"{stats['event_relations']} 条事件关系"
+    )
+    return KnowledgeGraphResponse(
         success=True,
-        message=(
-            f"共识别 {len(characters)} 位人物"
-            if characters
-            else "未识别到明显人物"
-        ),
+        message=summary,
         model=result.get("model"),
-        characters=characters,
+        chunks_processed=result.get("chunks_processed", 0),
+        characters=result["characters"],
+        events=result["events"],
+        character_event_relations=result["character_event_relations"],
+        character_relations=result["character_relations"],
+        event_relations=result["event_relations"],
+        stats=stats,
+    )
+
+
+def _sse_format(event: str, data: Any) -> bytes:
+    """Encode a single Server-Sent Event payload."""
+    payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
+    return f"data: {payload}\n\n".encode("utf-8")
+
+
+@router.post("/{novel_id}/knowledge-graph/stream")
+async def extract_knowledge_graph_stream_endpoint(
+    novel_id: int, payload: KnowledgeGraphRequest
+):
+    """Stream knowledge-graph extraction progress + partial results via SSE."""
+    if not await get_novel_detail(novel_id):
+        raise HTTPException(status_code=404, detail="小说不存在")
+
+    progress_queue: asyncio.Queue = asyncio.Queue()
+    partial_state: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _emit_progress(p: Dict[str, Any]) -> None:
+        progress_queue.put_nowait(("progress", p))
+
+    def _emit_partial(key: str, items: List[Dict[str, Any]]) -> None:
+        partial_state[key] = items
+        # Emit the cumulative state snapshot to keep client simple.
+        progress_queue.put_nowait(("partial", {key: items}))
+
+    async def _run_extraction() -> None:
+        try:
+            result = await extract_knowledge_graph_streaming(
+                novel_id,
+                model_config_id=payload.model_config_id,
+                chunk_size=payload.chunk_size,
+                max_concurrency=payload.max_concurrency,
+                on_progress=_emit_progress,
+                on_partial=_emit_partial,
+            )
+            progress_queue.put_nowait(("done", result))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Streaming extraction failed: %s", exc)
+            progress_queue.put_nowait(("error", str(exc)))
+        finally:
+            progress_queue.put_nowait(("__end__", None))
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        task = asyncio.create_task(_run_extraction())
+        try:
+            while True:
+                kind, payload_obj = await progress_queue.get()
+                if kind == "__end__":
+                    break
+                yield _sse_format(kind, payload_obj)
+            # Drain a final cancellation check.
+            if not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=1.0)
+                except asyncio.TimeoutError:
+                    task.cancel()
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )

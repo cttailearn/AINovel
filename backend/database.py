@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -58,21 +59,96 @@ SCHEMA_STATEMENTS: List[str] = [
     CREATE TABLE IF NOT EXISTS characters (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         novel_id INTEGER NOT NULL,
+        entity_id TEXT NOT NULL,
         name TEXT NOT NULL,
-        role TEXT,
-        aliases TEXT,
-        description TEXT,
-        first_appearance INTEGER,
+        attributes TEXT,
         model_id INTEGER,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
-        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL
+        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL,
+        UNIQUE (novel_id, entity_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        novel_id INTEGER NOT NULL,
+        entity_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        attributes TEXT,
+        model_id INTEGER,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
+        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL,
+        UNIQUE (novel_id, entity_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS character_event_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        novel_id INTEGER NOT NULL,
+        source_entity_id TEXT NOT NULL,
+        target_entity_id TEXT NOT NULL,
+        relation TEXT NOT NULL DEFAULT 'PARTICIPATES_IN',
+        role TEXT,
+        action TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS character_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        novel_id INTEGER NOT NULL,
+        source_entity_id TEXT NOT NULL,
+        target_entity_id TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        properties TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS event_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        novel_id INTEGER NOT NULL,
+        source_entity_id TEXT NOT NULL,
+        target_entity_id TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        properties TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_chapters_novel ON chapters(novel_id)",
     "CREATE INDEX IF NOT EXISTS idx_novels_created ON novels(created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_characters_novel ON characters(novel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_events_novel ON events(novel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ce_rels_novel ON character_event_relations(novel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_cc_rels_novel ON character_relations(novel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ee_rels_novel ON event_relations(novel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_characters_entity ON characters(novel_id, entity_id)",
+    "CREATE INDEX IF NOT EXISTS idx_events_entity ON events(novel_id, entity_id)",
+    """
+    CREATE TABLE IF NOT EXISTS prompt_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        description TEXT,
+        system_prompt TEXT NOT NULL DEFAULT '',
+        user_prompt_template TEXT NOT NULL DEFAULT '',
+        temperature REAL NOT NULL DEFAULT 0.3,
+        max_tokens INTEGER NOT NULL DEFAULT 2400,
+        is_builtin INTEGER NOT NULL DEFAULT 0,
+        is_enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_prompt_templates_category ON prompt_templates(category)",
 ]
 
 
@@ -80,10 +156,15 @@ async def init_db() -> None:
     Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("PRAGMA foreign_keys = ON")
+        # Run migrations FIRST so legacy tables are dropped/reshaped
+        # before any new CREATE INDEX statements reference their columns.
+        await _run_migrations(db)
         for stmt in SCHEMA_STATEMENTS:
             await db.execute(stmt)
-        await _run_migrations(db)
         await db.commit()
+    # Seed default AI prompt templates if not present.
+    from services.prompt_service import seed_default_prompts
+    await seed_default_prompts()
 
 
 async def _run_migrations(db: aiosqlite.Connection) -> None:
@@ -91,6 +172,12 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
     if novel_columns and "summary" not in novel_columns:
         await db.execute("ALTER TABLE novels ADD COLUMN summary TEXT")
         logger.info("Migration: added novels.summary column")
+
+    # Drop legacy characters table (pre-knowledge-graph schema).
+    char_columns = await _get_table_columns(db, "characters")
+    if char_columns and "entity_id" not in char_columns:
+        await db.execute("DROP TABLE characters")
+        logger.info("Migration: dropped legacy characters table")
 
 
 @asynccontextmanager
@@ -411,84 +498,303 @@ def _safe_remove(path: Optional[str]) -> None:
         logger.warning("Failed to remove file %s: %s", path, exc)
 
 
-def _normalize_aliases(value: Any) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
-    if isinstance(value, str):
-        return [v.strip() for v in value.split(",") if v.strip()]
-    return [str(value).strip()]
+def _decode_attributes(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
 
-async def replace_characters(
+def _encode_attributes(value: Any) -> str:
+    if not value:
+        return ""
+    return json.dumps(value, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph CRUD
+# ---------------------------------------------------------------------------
+
+
+async def replace_knowledge_graph(
     novel_id: int,
+    *,
     characters: List[Dict[str, Any]],
+    events: List[Dict[str, Any]],
+    character_event_relations: List[Dict[str, Any]],
+    character_relations: List[Dict[str, Any]],
+    event_relations: List[Dict[str, Any]],
     model_id: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Atomically replace the full knowledge graph for a novel."""
     async with get_db() as db:
         await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute("DELETE FROM character_event_relations WHERE novel_id = ?", (novel_id,))
+        await db.execute("DELETE FROM character_relations WHERE novel_id = ?", (novel_id,))
+        await db.execute("DELETE FROM event_relations WHERE novel_id = ?", (novel_id,))
+        await db.execute("DELETE FROM events WHERE novel_id = ?", (novel_id,))
         await db.execute("DELETE FROM characters WHERE novel_id = ?", (novel_id,))
-        inserted: List[Dict[str, Any]] = []
-        for item in characters:
-            aliases = _normalize_aliases(item.get("aliases"))
+
+        stored_chars: List[Dict[str, Any]] = []
+        for c in characters:
             cur = await db.execute(
                 """
                 INSERT INTO characters
-                    (novel_id, name, role, aliases, description,
-                     first_appearance, model_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (novel_id, entity_id, name, attributes, model_id)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     novel_id,
-                    str(item.get("name", "")).strip()[:200] or "未命名",
-                    (item.get("role") or "").strip() or None,
-                    ",".join(aliases) or None,
-                    (item.get("description") or "").strip() or None,
-                    int(item["first_appearance"]) if item.get("first_appearance") else None,
+                    str(c.get("entity_id") or c.get("id") or "").strip(),
+                    str(c.get("name", "")).strip()[:200] or "未命名",
+                    _encode_attributes(c.get("attributes") or {}),
                     model_id,
                 ),
             )
-            inserted.append(
+            stored_chars.append(
                 {
                     "id": cur.lastrowid,
                     "novel_id": novel_id,
-                    "name": str(item.get("name", "")).strip(),
-                    "role": (item.get("role") or "").strip() or None,
-                    "aliases": aliases,
-                    "description": (item.get("description") or "").strip() or None,
-                    "first_appearance": int(item["first_appearance"])
-                    if item.get("first_appearance")
-                    else None,
+                    "entity_id": str(c.get("entity_id") or c.get("id") or "").strip(),
+                    "name": str(c.get("name", "")).strip(),
+                    "attributes": c.get("attributes") or {},
                     "model_id": model_id,
                 }
             )
+
+        stored_events: List[Dict[str, Any]] = []
+        for e in events:
+            cur = await db.execute(
+                """
+                INSERT INTO events
+                    (novel_id, entity_id, name, attributes, model_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    novel_id,
+                    str(e.get("entity_id") or e.get("id") or "").strip(),
+                    str(e.get("name", "")).strip()[:200] or "未命名事件",
+                    _encode_attributes(e.get("attributes") or {}),
+                    model_id,
+                ),
+            )
+            stored_events.append(
+                {
+                    "id": cur.lastrowid,
+                    "novel_id": novel_id,
+                    "entity_id": str(e.get("entity_id") or e.get("id") or "").strip(),
+                    "name": str(e.get("name", "")).strip(),
+                    "attributes": e.get("attributes") or {},
+                    "model_id": model_id,
+                }
+            )
+
+        stored_ce: List[Dict[str, Any]] = []
+        for r in character_event_relations:
+            cur = await db.execute(
+                """
+                INSERT INTO character_event_relations
+                    (novel_id, source_entity_id, target_entity_id,
+                     relation, role, action)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    novel_id,
+                    str(r.get("source") or r.get("source_entity_id") or "").strip(),
+                    str(r.get("target") or r.get("target_entity_id") or "").strip(),
+                    str(r.get("relation") or "PARTICIPATES_IN").strip() or "PARTICIPATES_IN",
+                    (r.get("role") or None),
+                    (r.get("action") or None),
+                ),
+            )
+            stored_ce.append(
+                {
+                    "id": cur.lastrowid,
+                    "novel_id": novel_id,
+                    "source_entity_id": str(r.get("source") or "").strip(),
+                    "target_entity_id": str(r.get("target") or "").strip(),
+                    "relation": str(r.get("relation") or "PARTICIPATES_IN").strip(),
+                    "role": r.get("role") or None,
+                    "action": r.get("action") or None,
+                }
+            )
+
+        stored_cc: List[Dict[str, Any]] = []
+        for r in character_relations:
+            cur = await db.execute(
+                """
+                INSERT INTO character_relations
+                    (novel_id, source_entity_id, target_entity_id,
+                     relation, properties)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    novel_id,
+                    str(r.get("source") or r.get("source_entity_id") or "").strip(),
+                    str(r.get("target") or r.get("target_entity_id") or "").strip(),
+                    str(r.get("relation") or "").strip() or "关联",
+                    _encode_attributes(r.get("properties") or {}),
+                ),
+            )
+            stored_cc.append(
+                {
+                    "id": cur.lastrowid,
+                    "novel_id": novel_id,
+                    "source_entity_id": str(r.get("source") or "").strip(),
+                    "target_entity_id": str(r.get("target") or "").strip(),
+                    "relation": str(r.get("relation") or "").strip() or "关联",
+                    "properties": r.get("properties") or {},
+                }
+            )
+
+        stored_ee: List[Dict[str, Any]] = []
+        for r in event_relations:
+            cur = await db.execute(
+                """
+                INSERT INTO event_relations
+                    (novel_id, source_entity_id, target_entity_id,
+                     relation, properties)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    novel_id,
+                    str(r.get("source") or r.get("source_entity_id") or "").strip(),
+                    str(r.get("target") or r.get("target_entity_id") or "").strip(),
+                    str(r.get("relation") or "").strip() or "关联",
+                    _encode_attributes(r.get("properties") or {}),
+                ),
+            )
+            stored_ee.append(
+                {
+                    "id": cur.lastrowid,
+                    "novel_id": novel_id,
+                    "source_entity_id": str(r.get("source") or "").strip(),
+                    "target_entity_id": str(r.get("target") or "").strip(),
+                    "relation": str(r.get("relation") or "").strip() or "关联",
+                    "properties": r.get("properties") or {},
+                }
+            )
+
         await db.commit()
-        return inserted
+        return {
+            "characters": stored_chars,
+            "events": stored_events,
+            "character_event_relations": stored_ce,
+            "character_relations": stored_cc,
+            "event_relations": stored_ee,
+        }
 
 
-async def get_characters_by_novel(novel_id: int) -> List[Dict[str, Any]]:
+async def get_knowledge_graph(novel_id: int) -> Dict[str, List[Dict[str, Any]]]:
     async with get_db() as db:
         cur = await db.execute(
             """
-            SELECT id, novel_id, name, role, aliases, description,
-                   first_appearance, model_id, created_at, updated_at
-            FROM characters
-            WHERE novel_id = ?
-            ORDER BY id
+            SELECT id, novel_id, entity_id, name, attributes,
+                   model_id, created_at, updated_at
+            FROM characters WHERE novel_id = ? ORDER BY entity_id
             """,
             (novel_id,),
         )
-        rows = _rows_to_dicts(await cur.fetchall())
-    for row in rows:
-        aliases = row.get("aliases") or ""
-        row["aliases"] = [a for a in aliases.split(",") if a] if aliases else []
-    return rows
+        characters: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["attributes"] = _decode_attributes(row.get("attributes"))
+            characters.append(row)
+
+        cur = await db.execute(
+            """
+            SELECT id, novel_id, entity_id, name, attributes,
+                   model_id, created_at, updated_at
+            FROM events WHERE novel_id = ? ORDER BY entity_id
+            """,
+            (novel_id,),
+        )
+        events: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["attributes"] = _decode_attributes(row.get("attributes"))
+            events.append(row)
+
+        cur = await db.execute(
+            """
+            SELECT id, novel_id, source_entity_id, target_entity_id,
+                   relation, role, action
+            FROM character_event_relations WHERE novel_id = ?
+            """,
+            (novel_id,),
+        )
+        ce_relations = _rows_to_dicts(await cur.fetchall())
+
+        cur = await db.execute(
+            """
+            SELECT id, novel_id, source_entity_id, target_entity_id,
+                   relation, properties
+            FROM character_relations WHERE novel_id = ?
+            """,
+            (novel_id,),
+        )
+        cc_relations: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["properties"] = _decode_attributes(row.get("properties"))
+            cc_relations.append(row)
+
+        cur = await db.execute(
+            """
+            SELECT id, novel_id, source_entity_id, target_entity_id,
+                   relation, properties
+            FROM event_relations WHERE novel_id = ?
+            """,
+            (novel_id,),
+        )
+        ee_relations: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["properties"] = _decode_attributes(row.get("properties"))
+            ee_relations.append(row)
+
+    return {
+        "characters": characters,
+        "events": events,
+        "character_event_relations": ce_relations,
+        "character_relations": cc_relations,
+        "event_relations": ee_relations,
+    }
 
 
-async def delete_characters_by_novel(novel_id: int) -> int:
+async def get_kg_stats(novel_id: int) -> Dict[str, int]:
     async with get_db() as db:
-        cur = await db.execute("DELETE FROM characters WHERE novel_id = ?", (novel_id,))
-        await db.commit()
-        return cur.rowcount or 0
+        cur = await db.execute(
+            "SELECT COUNT(*) AS c FROM characters WHERE novel_id = ?", (novel_id,)
+        )
+        char_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) AS c FROM events WHERE novel_id = ?", (novel_id,)
+        )
+        event_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) AS c FROM character_event_relations WHERE novel_id = ?",
+            (novel_id,),
+        )
+        ce_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) AS c FROM character_relations WHERE novel_id = ?",
+            (novel_id,),
+        )
+        cc_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) AS c FROM event_relations WHERE novel_id = ?",
+            (novel_id,),
+        )
+        ee_count = (await cur.fetchone())[0]
+    return {
+        "characters": char_count,
+        "events": event_count,
+        "participations": ce_count,
+        "character_relations": cc_count,
+        "event_relations": ee_count,
+    }
 

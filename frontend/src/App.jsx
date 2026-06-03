@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { ApiError, api } from './api/client.js';
 import { useToast } from './components/Toast/ToastProvider.jsx';
 import { ModelConfigPanel } from './components/ModelConfigPanel.jsx';
+import { PromptManagerPanel } from './components/PromptManagerPanel.jsx';
 import { Workbench } from './components/Workbench.jsx';
-import { CharacterExtractionPage } from './components/CharacterExtractionPage.jsx';
+import { KnowledgeGraphPage } from './components/KnowledgeGraphPage.jsx';
 import { useTheme } from './ThemeContext.jsx';
 import './App.css';
 
@@ -64,17 +65,16 @@ const NAV_ITEMS = [
     ),
   },
   {
-    key: 'characters',
-    title: '人物提取',
+    key: 'knowledge',
+    title: '知识图谱',
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-        <path
-          d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM22 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
+        <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2" />
+        <circle cx="4" cy="6" r="2" stroke="currentColor" strokeWidth="2" />
+        <circle cx="20" cy="6" r="2" stroke="currentColor" strokeWidth="2" />
+        <circle cx="4" cy="18" r="2" stroke="currentColor" strokeWidth="2" />
+        <circle cx="20" cy="18" r="2" stroke="currentColor" strokeWidth="2" />
+        <path d="M6 6l4 4M18 6l-4 4M6 18l4-4M18 18l-4-4" stroke="currentColor" strokeWidth="1.5" />
       </svg>
     ),
   },
@@ -100,6 +100,7 @@ export default function App() {
   const { theme, toggleTheme } = useTheme();
   const toast = useToast();
   const [activeNav, setActiveNav] = useState('workbench');
+  const [settingsTab, setSettingsTab] = useState('models');
   const [models, setModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(true);
 
@@ -179,8 +180,8 @@ export default function App() {
         <section className="rail-body">
           {activeNav === 'workbench' ? (
             <Workbench models={models} />
-          ) : activeNav === 'characters' ? (
-            <CharacterExtractionPage models={models} />
+          ) : activeNav === 'knowledge' ? (
+            <KnowledgeGraphPage models={models} />
           ) : modelsLoading ? (
             <div className="loading-block">
               <div className="loading-spinner large"></div>
@@ -188,7 +189,34 @@ export default function App() {
             </div>
           ) : (
             <div className="settings-page">
-              <ModelConfigPanel configs={models} refetch={fetchModels} />
+              <div className="settings-tabs">
+                <button
+                  type="button"
+                  className={`settings-tab ${settingsTab === 'models' ? 'active' : ''}`}
+                  onClick={() => setSettingsTab('models')}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                    <rect x="3" y="4" width="18" height="16" rx="3" stroke="currentColor" strokeWidth="2" />
+                    <path d="M8 9h8M8 13h5" stroke="currentColor" strokeWidth="2" />
+                  </svg>
+                  模型配置
+                </button>
+                <button
+                  type="button"
+                  className={`settings-tab ${settingsTab === 'prompts' ? 'active' : ''}`}
+                  onClick={() => setSettingsTab('prompts')}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                    <path d="M4 5h16M4 12h16M4 19h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                  提示词管理
+                </button>
+              </div>
+              {settingsTab === 'models' ? (
+                <ModelConfigPanel configs={models} refetch={fetchModels} />
+              ) : (
+                <PromptManagerPanel />
+              )}
             </div>
           )}
         </section>

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -111,6 +111,63 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+# ---------------------------------------------------------------------------
+# Prompt template management
+# ---------------------------------------------------------------------------
+
+
+class PromptCategory(BaseModel):
+    key: str
+    label: str
+    description: str = ""
+
+
+class PromptTemplateBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    system_prompt: str = Field(default="")
+    user_prompt_template: str = Field(default="")
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=2400, ge=1, le=128_000)
+    is_enabled: bool = True
+
+
+class PromptTemplateOut(BaseModel):
+    id: int
+    key: str
+    name: str
+    category: str
+    description: str = ""
+    system_prompt: str = ""
+    user_prompt_template: str = ""
+    temperature: float
+    max_tokens: int
+    is_builtin: bool
+    is_enabled: bool
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class PromptTemplateUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)
+    system_prompt: Optional[str] = None
+    user_prompt_template: Optional[str] = None
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(default=None, ge=1, le=128_000)
+    is_enabled: Optional[bool] = None
+
+
+class PromptTemplateCreate(PromptTemplateBase):
+    key: str = Field(..., min_length=1, max_length=100)
+    category: str = Field(..., min_length=1, max_length=50)
+
+
+class PromptListResponse(BaseModel):
+    prompts: List[PromptTemplateOut]
+    categories: List[PromptCategory]
+
+
 class CharacterExtractionRequest(BaseModel):
     model_config_id: Optional[int] = Field(default=None, ge=1)
     max_chars: int = Field(default=8000, ge=1000, le=120_000)
@@ -130,4 +187,52 @@ class CharacterExtractionResponse(BaseModel):
     message: str
     model: Optional[str] = None
     characters: List[Character] = []
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeGraphRequest(BaseModel):
+    model_config_id: Optional[int] = Field(default=None, ge=1)
+    chunk_size: int = Field(default=8000, ge=1000, le=120_000)
+    max_concurrency: int = Field(default=3, ge=1, le=10)
+
+
+class KnowledgeGraphEntity(BaseModel):
+    id: str
+    name: str
+    attributes: Dict[str, Any] = {}
+
+
+class KnowledgeGraphRelation(BaseModel):
+    source: str
+    relation: str
+    target: str
+    role: Optional[str] = None
+    action: Optional[str] = None
+    properties: Dict[str, Any] = {}
+
+
+class KnowledgeGraphStats(BaseModel):
+    characters: int = 0
+    events: int = 0
+    participations: int = 0
+    character_relations: int = 0
+    event_relations: int = 0
+    chunks_processed: int = 0
+
+
+class KnowledgeGraphResponse(BaseModel):
+    success: bool
+    message: str
+    model: Optional[str] = None
+    chunks_processed: int = 0
+    characters: List[KnowledgeGraphEntity] = []
+    events: List[KnowledgeGraphEntity] = []
+    character_event_relations: List[KnowledgeGraphRelation] = []
+    character_relations: List[KnowledgeGraphRelation] = []
+    event_relations: List[KnowledgeGraphRelation] = []
+    stats: KnowledgeGraphStats = KnowledgeGraphStats()
 

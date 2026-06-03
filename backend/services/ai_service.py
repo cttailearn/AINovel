@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -8,8 +9,35 @@ import httpx
 
 from schemas import ConnectionTestRequest, ConnectionTestResponse
 
+logger = logging.getLogger(__name__)
+
 REQUEST_TIMEOUT_SECONDS = 60.0
 CHAT_TIMEOUT_SECONDS = 90.0
+CONNECTION_TEST_PROMPT_KEY = "connection.test"
+
+
+async def _resolve_connection_test_payload() -> Dict[str, Any]:
+    """Return the user prompt + system prompt for the connection test.
+
+    Falls back to ``{"system_prompt": "", "user_prompt": "hi"}`` if the
+    template is disabled / missing in the database.
+    """
+    fallback = {"system_prompt": "", "user_prompt": "hi"}
+    try:
+        from services import prompt_service
+
+        tmpl = await prompt_service.get_active_prompt_by_key(
+            CONNECTION_TEST_PROMPT_KEY
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load connection test prompt: %s", exc)
+        return fallback
+    if not tmpl:
+        return fallback
+    return {
+        "system_prompt": tmpl.get("system_prompt") or "",
+        "user_prompt": tmpl.get("user_prompt_template") or fallback["user_prompt"],
+    }
 
 
 async def _send_probe(client: httpx.AsyncClient, request: ConnectionTestRequest) -> httpx.Response:
@@ -22,23 +50,34 @@ async def _send_probe(client: httpx.AsyncClient, request: ConnectionTestRequest)
         "max_tokens": 1,
     }
 
+    test_payload = await _resolve_connection_test_payload()
+    system_prompt = test_payload["system_prompt"]
+    user_prompt = test_payload["user_prompt"]
+
     if request.provider.lower() == "anthropic":
         return await client.post(
             f"{request.model_url.rstrip('/')}/v1/messages",
             headers={**headers, "anthropic-version": "2023-06-01"},
             json={
                 **payload,
-                "system": "",
-                "messages": [{"role": "user", "content": "hi"}],
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
             },
         )
 
+    if system_prompt:
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+    else:
+        messages = [{"role": "user", "content": user_prompt}]
     return await client.post(
         f"{request.model_url.rstrip('/')}/v1/chat/completions",
         headers=headers,
         json={
             **payload,
-            "messages": [{"role": "user", "content": "hi"}],
+            "messages": messages,
         },
     )
 

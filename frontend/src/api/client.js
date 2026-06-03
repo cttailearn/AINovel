@@ -119,6 +119,125 @@ export function uploadWithProgress(
   });
 }
 
+async function readSseStream(response, onEvent) {
+  const reader = response.body && response.body.getReader
+    ? response.body.getReader()
+    : null;
+  if (!reader) {
+    // Fallback: read entire text and split by lines.
+    const text = await response.text();
+    for (const raw of text.split(/\r?\n/)) {
+      if (!raw.startsWith('data:')) continue;
+      const body = raw.slice(5).trim();
+      if (!body) continue;
+      try {
+        const obj = JSON.parse(body);
+        onEvent?.(obj);
+      } catch {
+        // ignore
+      }
+    }
+    return;
+  }
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      for (const raw of block.split(/\r?\n/)) {
+        if (!raw.startsWith('data:')) continue;
+        const body = raw.slice(5).trim();
+        if (!body) continue;
+        try {
+          const obj = JSON.parse(body);
+          onEvent?.(obj);
+        } catch {
+          // ignore non-JSON keepalive lines
+        }
+      }
+    }
+  }
+  if (buffer.trim()) {
+    const tail = buffer.trim();
+    if (tail.startsWith('data:')) {
+      const body = tail.slice(5).trim();
+      if (body) {
+        try {
+          onEvent?.(JSON.parse(body));
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+}
+
+export function postStream(path, body, { onEvent, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', joinUrl(API_PREFIX, path));
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.setRequestHeader('Accept', 'text/event-stream');
+    if (signal) {
+      if (signal.aborted) {
+        reject(new DOMException('请求已取消', 'AbortError'));
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        try { xhr.abort(); } catch { /* noop */ }
+        reject(new DOMException('请求已取消', 'AbortError'));
+      });
+    }
+    xhr.onerror = () => reject(new ApiError('网络错误', 0, null));
+    xhr.onabort = () => reject(new DOMException('请求已取消', 'AbortError'));
+    let buffer = '';
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState === 3 || xhr.readyState === 4) {
+        const chunk = xhr.responseText.slice(buffer.length);
+        buffer = xhr.responseText;
+        if (chunk) {
+          let idx;
+          let work = chunk;
+          while ((idx = work.indexOf('\n\n')) >= 0) {
+            const block = work.slice(0, idx);
+            work = work.slice(idx + 2);
+            for (const raw of block.split(/\r?\n/)) {
+              if (!raw.startsWith('data:')) continue;
+              const body = raw.slice(5).trim();
+              if (!body) continue;
+              try {
+                onEvent?.(JSON.parse(body));
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
+      }
+      if (xhr.readyState === 4) {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          let payload = null;
+          if (xhr.responseText) {
+            try { payload = JSON.parse(xhr.responseText); } catch { /* noop */ }
+          }
+          const detail = payload && payload.detail ? payload.detail : xhr.statusText;
+          reject(new ApiError(detail || `请求失败 (${xhr.status})`, xhr.status, payload));
+        }
+      }
+    };
+    xhr.send(JSON.stringify(body));
+  });
+}
+
+
 export const api = {
   health: () => apiRequest('/health'),
   models: {
@@ -176,12 +295,31 @@ export const api = {
     upload: (file, { onProgress, signal } = {}) =>
       uploadWithProgress('/novels/upload', file, { onProgress, signal }),
     listCharacters: (id, options) =>
-      apiRequest(`/novels/${id}/characters`, options),
+      apiRequest(`/novels/${id}/knowledge-graph`, options),
     extractCharacters: (id, payload, options) =>
-      apiRequest(`/novels/${id}/characters`, {
+      apiRequest(`/novels/${id}/knowledge-graph`, {
         method: 'POST',
         body: payload,
         ...options,
       }),
+    extractCharactersStream: (id, payload, { onEvent, signal } = {}) =>
+      postStream(`/novels/${id}/knowledge-graph/stream`, payload, {
+        onEvent,
+        signal,
+      }),
+    getKgStats: (id, options) =>
+      apiRequest(`/novels/${id}/kg-stats`, options),
+  },
+  prompts: {
+    list: (options) => apiRequest('/prompts', options),
+    detail: (id, options) => apiRequest(`/prompts/${id}`, options),
+    update: (id, payload, options) =>
+      apiRequest(`/prompts/${id}`, { method: 'PUT', body: payload, ...options }),
+    reset: (id, options) =>
+      apiRequest(`/prompts/reset/${id}`, { method: 'POST', ...options }),
+    create: (payload, options) =>
+      apiRequest('/prompts', { method: 'POST', body: payload, ...options }),
+    remove: (id, options) =>
+      apiRequest(`/prompts/${id}`, { method: 'DELETE', ...options }),
   },
 };

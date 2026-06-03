@@ -17,12 +17,22 @@ async def read_text_file(path: str) -> str:
 async def read_text_slice(
     path: str, start: int, end: int
 ) -> str:
+    """按字符偏移读取文件切片。
+
+    入参 ``start`` / ``end`` 是 UTF-8 解码后字符串中的**字符偏移**
+    （与 ``re.Match.start()`` / ``len(text)`` 一致），而不是字节偏移。
+    中文等多字节字符若按字节读取会落在字符中间导致乱码，因此这里
+    统一读取全文后按字符切片。
+    """
     def _read() -> str:
-        length = max(0, end - start)
+        if end <= start:
+            return ""
         with open(path, "rb") as f:
-            f.seek(start)
-            raw = f.read(length)
-        return raw.decode("utf-8", errors="replace")
+            raw = f.read()
+        text = raw.decode("utf-8", errors="replace")
+        lo = max(0, min(start, len(text)))
+        hi = max(lo, min(end, len(text)))
+        return text[lo:hi]
 
     return await asyncio.to_thread(_read)
 

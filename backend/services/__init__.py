@@ -1,6 +1,10 @@
-from . import file_service
+from . import file_service, prompt_service
 from .ai_service import test_connection
-from .character_service import extract_characters, list_characters
+from .kg_service import (
+    extract_knowledge_graph,
+    extract_knowledge_graph_streaming,
+    list_knowledge_graph,
+)
 from .model_service import (
     create_model,
     delete_model,
@@ -27,6 +31,7 @@ from .novel_service import (
 
 __all__ = [
     "file_service",
+    "prompt_service",
     "test_connection",
     "list_all_configs",
     "list_enabled_configs",
@@ -47,7 +52,7 @@ __all__ = [
     "get_raw_content",
     "smart_chunk_content",
     "ParseError",
-    "extract_characters",
-    "list_characters",
+    "extract_knowledge_graph",
+    "extract_knowledge_graph_streaming",
+    "list_knowledge_graph",
 ]
-
