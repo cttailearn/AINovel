@@ -261,6 +261,97 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
         "temperature": 0.3,
         "max_tokens": 2400,
     },
+    # ---- knowledge graph: validator prompts (used by MergeValidatorAgent) ---
+    {
+        "key": "kg.validator.dedup",
+        "category": "kg",
+        "name": "实体同义合并校验",
+        "description": "Validator 阶段: 给定候选人物/事件对, 判断是否同义, 若是返回合并结果。",
+        "system_prompt": (
+            "你是一名严谨的知识图谱质量审查员, 擅长判断两个实体是否指向同一个人物/事件。"
+            "只输出 JSON, 不要解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """判断以下两个实体是否指向同一个人物(若是人物)或同一个事件(若是事件)。
+
+候选 A: {a_json}
+候选 B: {b_json}
+原文片段: {evidence}
+
+要求:
+1. 仅在能确定指向同一对象时返回 is_same=true; 若只有较弱关联则返回 false。
+2. 若 A、B 实为同一对象, merged 字段返回合并后的实体(保留更具体、属性更完整的那一方, 属性取并集并去重)。
+3. 若 A、B 是不同对象, merged 字段省略。
+
+输出 JSON:
+{{
+  "is_same": true,
+  "merged": {{
+    "id": "char_xxx 或 evt_xxx",
+    "name": "...",
+    "attributes": {{...}}
+  }}
+}}
+无则 {{"is_same": false}}。""",
+        "temperature": 0.1,
+        "max_tokens": 800,
+    },
+    {
+        "key": "kg.validator.completeness",
+        "category": "kg",
+        "name": "覆盖度核查",
+        "description": "Validator 阶段: 对已抽取的人物/事件/关系, 核查是否存在漏抽取。",
+        "system_prompt": (
+            "你是一名严谨的知识图谱审查员, 找出抽取结果中可能漏掉的人物、事件、关系。"
+            "只输出 JSON, 不要解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """对照原文,核查以下抽取结果是否完整。
+
+已知人物: {character_list_json}
+已知事件: {event_list_json}
+已知人物-事件参与: {participation_list_json}
+原文片段: {chunk_text}
+
+任务:
+1. missing_characters: 列出原文中有名字/称谓/有对白, 但未出现在已知人物列表的可疑人物(给候选名和证据)。
+2. missing_events: 列出原文中有明确情节转折或交互, 但未出现在已知事件的可疑事件(给候选名和证据)。
+3. missing_participations: 对每个已知事件, 列出"明显应当参与"但未在已知参与关系中的人物(给 character_id, event_id, 角色, 证据)。
+
+输出 JSON:
+{{
+  "missing_characters": [{{"name": "...", "evidence": "..."}}],
+  "missing_events": [{{"name": "...", "evidence": "..."}}],
+  "missing_participations": [
+    {{"character": "char_xxx", "event": "evt_xxx", "role": "...", "evidence": "..."}}
+  ]
+}}
+若无缺失, 对应数组输出 []。""",
+        "temperature": 0.2,
+        "max_tokens": 2000,
+    },
+    {
+        "key": "kg.validator.re_extract",
+        "category": "kg",
+        "name": "补漏重抽",
+        "description": "Validator 反馈环: 针对覆盖度核查标记的缺失项, 定向补抽。",
+        "system_prompt": (
+            "你是一名严谨的知识图谱构建员, 只针对列出的缺失项进行补抽, 不要重复输出已存在的实体。"
+            "只输出 JSON 数组, 不要解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """已知实体: {existing_list_json}
+待补抽缺失项: {missing_json}
+原文片段: {chunk_text}
+
+针对每个缺失项, 输出一个对象, 用 type 区分:
+- "character": {{"type": "character", "id": "char_xxx", "name": "...", "attributes": {{...}}}}
+- "event":    {{"type": "event",    "id": "evt_xxx",  "name": "...", "attributes": {{...}}}}
+- "participation": {{"type": "participation", "source": "char_xxx", "target": "evt_xxx",
+                       "relation": "PARTICIPATES_IN",
+                       "role": "...", "action": "..."}}
+
+输出严格 JSON 数组, 元素只能是以上三种之一。""",
+        "temperature": 0.2,
+        "max_tokens": 2000,
+    },
 ]
 
 

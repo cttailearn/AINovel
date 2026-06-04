@@ -1188,3 +1188,235 @@ async def extract_knowledge_graph_streaming(
             "chunks_processed": len(chunks),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent pipeline: ExtractorAgent + MergeValidatorAgent
+# ---------------------------------------------------------------------------
+
+
+async def extract_knowledge_graph_v2(
+    novel_id: int,
+    *,
+    model_config_id: Optional[int] = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    max_concurrency: int = MAX_CONCURRENCY,
+    run_validator: bool = True,
+    run_llm_dedup: bool = True,
+    run_llm_completeness: bool = False,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    on_partial: Optional[
+        Callable[[str, List[Dict[str, Any]]], None]
+    ] = None,
+) -> Dict[str, Any]:
+    """Multi-agent extraction pipeline.
+
+    Pipeline:
+      1. chunking (existing ``chunk_novel``)
+      2. ``ExtractorAgent`` runs the 5 phases and attaches evidence /
+         confidence to every item.
+      3. ``merge_characters`` / ``merge_events`` / ``merge_relations`` fold
+         the per-chunk results into a single global list (same as v1).
+      4. ``MergeValidatorAgent.validate`` runs hard-rule normalization
+         (whitespace in attribute keys, parens in names, reference
+         integrity, coverage stats) and optional LLM dedup / completeness.
+      5. The validated graph is persisted via ``replace_knowledge_graph``.
+
+    The original ``extract_knowledge_graph`` / ``..._streaming`` are kept
+    intact for backward compatibility.
+    """
+    # Local imports to avoid a top-level cycle: agents -> kg_service.
+    from services.agents import ExtractorAgent, MergeValidatorAgent
+
+    if on_progress is None:
+        on_progress = lambda _p: None  # noqa: E731
+    if on_partial is None:
+        on_partial = lambda _k, _v: None  # noqa: E731
+
+    novel = await get_novel_detail(novel_id)
+    if not novel:
+        raise ValueError("小说不存在")
+    file_path = novel.get("file_path")
+    if not file_path:
+        raise ValueError("文件路径缺失")
+
+    on_progress({
+        "event": "start", "message": "开始加载小说内容", "percent": 0,
+    })
+
+    content = await file_service.read_text_file(file_path)
+    if not (content or "").strip():
+        raise ValueError("小说内容为空")
+
+    model_cfg = await _resolve_model_config(model_config_id)
+    prompts = await resolve_prompts_async()
+    chunks = chunk_novel(content, novel.get("chapters") or [], chunk_size)
+    if not chunks:
+        raise ValueError("无法切分文本，请先解析章节或调整分块大小")
+
+    on_progress({
+        "event": "ready",
+        "message": f"共切分为 {len(chunks)} 个片段",
+        "percent": 2,
+        "chunks": len(chunks),
+        "model": model_cfg.get("name") or model_cfg.get("model_name"),
+    })
+
+    extractor = ExtractorAgent(
+        model_cfg, prompts, max_concurrency=max_concurrency,
+    )
+
+    # ---- Phase 1: characters -------------------------------------------
+    char_output = await extractor.run_phase("character", chunks)
+    global_characters = merge_characters(char_output.dicts_by_chunk())
+    on_progress({
+        "event": "phase_done", "phase": "characters",
+        "count": len(global_characters), "percent": 20,
+        "message": f"人物抽取: {len(global_characters)}",
+    })
+    on_partial("characters", global_characters)
+
+    character_list_json = json.dumps(
+        [{"id": c["id"], "name": c["name"]} for c in global_characters],
+        ensure_ascii=False,
+    )
+
+    # ---- Phase 2: events -----------------------------------------------
+    event_output = await extractor.run_phase(
+        "event", chunks, character_list_json=character_list_json,
+    )
+    global_events = merge_events(event_output.dicts_by_chunk())
+    on_progress({
+        "event": "phase_done", "phase": "events",
+        "count": len(global_events), "percent": 40,
+        "message": f"事件抽取: {len(global_events)}",
+    })
+    on_partial("events", global_events)
+
+    event_list_json = json.dumps(
+        [{"id": e["id"], "name": e["name"]} for e in global_events],
+        ensure_ascii=False,
+    )
+
+    char_ids = {c["id"] for c in global_characters}
+    event_ids = {e["id"] for e in global_events}
+
+    # ---- Phase 3: participations ---------------------------------------
+    part_output = await extractor.run_phase(
+        "participation", chunks,
+        character_list_json=character_list_json,
+        event_list_json=event_list_json,
+    )
+    global_participations = merge_relations(
+        part_output.dicts_by_chunk(),
+        valid_sources=char_ids, valid_targets=event_ids,
+    )
+    on_progress({
+        "event": "phase_done", "phase": "participations",
+        "count": len(global_participations), "percent": 60,
+        "message": f"参与关系: {len(global_participations)}",
+    })
+    on_partial("participations", global_participations)
+
+    # ---- Phase 4: character relations ----------------------------------
+    char_rel_output = await extractor.run_phase(
+        "char_relation", chunks, character_list_json=character_list_json,
+    )
+    global_char_rels = merge_relations(
+        char_rel_output.dicts_by_chunk(),
+        valid_sources=char_ids, valid_targets=char_ids,
+    )
+    on_progress({
+        "event": "phase_done", "phase": "char_relations",
+        "count": len(global_char_rels), "percent": 75,
+        "message": f"人物关系: {len(global_char_rels)}",
+    })
+    on_partial("char_relations", global_char_rels)
+
+    # ---- Phase 5: event relations --------------------------------------
+    evt_rel_output = await extractor.run_phase(
+        "event_relation", chunks, event_list_json=event_list_json,
+    )
+    global_event_rels = merge_relations(
+        evt_rel_output.dicts_by_chunk(),
+        valid_sources=event_ids, valid_targets=event_ids,
+    )
+    on_progress({
+        "event": "phase_done", "phase": "event_relations",
+        "count": len(global_event_rels), "percent": 88,
+        "message": f"事件关系: {len(global_event_rels)}",
+    })
+    on_partial("event_relations", global_event_rels)
+
+    # ---- Validator -----------------------------------------------------
+    validation_block: Optional[Dict[str, Any]] = None
+    if run_validator:
+        evidence_by_id: Dict[str, str] = {}
+        for it in char_output.items + event_output.items:
+            if it.evidence and it.chunk_id not in evidence_by_id:
+                evidence_by_id[it.chunk_id] = it.evidence
+
+        validator = MergeValidatorAgent()
+        validated = await validator.validate(
+            characters=global_characters,
+            events=global_events,
+            participations=global_participations,
+            char_relations=global_char_rels,
+            event_relations=global_event_rels,
+            chunks=chunks,
+            evidence_by_id=evidence_by_id,
+            model_cfg=model_cfg,
+            run_llm_dedup=run_llm_dedup,
+            run_llm_completeness=run_llm_completeness,
+        )
+        global_characters = validated.characters
+        global_events = validated.events
+        global_participations = validated.participations
+        global_char_rels = validated.char_relations
+        global_event_rels = validated.event_relations
+        on_progress({
+            "event": "validator_done",
+            "issues_count": len(validated.issues),
+            "dedup_count": len(validated.dedup_log),
+            "percent": 95,
+            "message": (
+                f"校验: {len(validated.issues)} 个问题, "
+                f"合并 {len(validated.dedup_log)} 组"
+            ),
+        })
+        validation_block = {
+            "issues": [i.__dict__ for i in validated.issues],
+            "dedup_log": validated.dedup_log,
+            "coverage": validated.coverage,
+        }
+
+    stored = await replace_knowledge_graph(
+        novel_id,
+        characters=global_characters,
+        events=global_events,
+        character_event_relations=global_participations,
+        character_relations=global_char_rels,
+        event_relations=global_event_rels,
+        model_id=model_cfg.get("id"),
+    )
+
+    on_progress({"event": "done", "percent": 100, "message": "完成"})
+
+    return {
+        "model": model_cfg.get("name") or model_cfg.get("model_name"),
+        "chunks_processed": len(chunks),
+        "characters": stored["characters"],
+        "events": stored["events"],
+        "character_event_relations": stored["character_event_relations"],
+        "character_relations": stored["character_relations"],
+        "event_relations": stored["event_relations"],
+        "validation": validation_block,
+        "stats": {
+            "characters": len(stored["characters"]),
+            "events": len(stored["events"]),
+            "participations": len(stored["character_event_relations"]),
+            "character_relations": len(stored["character_relations"]),
+            "event_relations": len(stored["event_relations"]),
+            "chunks_processed": len(chunks),
+        },
+    }

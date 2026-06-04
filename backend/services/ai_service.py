@@ -45,6 +45,20 @@ async def _send_probe(client: httpx.AsyncClient, request: ConnectionTestRequest)
         "Authorization": f"Bearer {request.api_key}",
         "Content-Type": "application/json",
     }
+
+    # Image generation models dispatch through the image_service provider
+    # registry (MiniMax, DashScope, …). Each provider owns its own URL path
+    # and request envelope.
+    if (request.capability or "chat").lower() == "image":
+        from services.image_service import build_probe_request
+
+        endpoint, payload, _ = await build_probe_request(
+            provider=request.provider or "minimax",
+            model_url=request.model_url,
+            model_name=request.model_name,
+        )
+        return await client.post(endpoint, headers=headers, json=payload)
+
     payload: Dict[str, Any] = {
         "model": request.model_name,
         "max_tokens": 1,
@@ -100,6 +114,22 @@ async def test_connection(request: ConnectionTestRequest) -> ConnectionTestRespo
 
     elapsed = round(time.monotonic() - start, 3)
     if response.status_code in (200, 201):
+        # For image models, also check the body for a non-success status.
+        # MiniMax returns 200 with base_resp.status_code != 0 on quota /
+        # safety issues; DashScope returns 200 with a top-level "code"
+        # field. The image_service provider knows how to detect both.
+        if (request.capability or "chat").lower() == "image":
+            from services.image_service import parse_probe_response
+
+            err = await parse_probe_response(
+                request.provider or "minimax", response
+            )
+            if err:
+                return ConnectionTestResponse(
+                    success=False,
+                    message=f"API 错误: {err}",
+                    response_time=elapsed,
+                )
         return ConnectionTestResponse(
             success=True,
             message="连接成功",
@@ -149,7 +179,16 @@ async def chat_completion(
     temperature: float = 0.4,
     max_tokens: int = 2048,
     timeout: float = CHAT_TIMEOUT_SECONDS,
+    retries: int = 0,
+    retry_base_delay: float = 1.0,
 ) -> str:
+    """Call the LLM with optional retries on transient empty / network errors.
+
+    ``retries=0`` keeps the original one-shot behaviour. Callers that
+    can tolerate duplicate work (validator dedup/completeness) typically
+    pass ``retries=2`` to absorb the occasional "AI 响应内容为空" from
+    anthropic-protocol proxies that return thinking-only blocks.
+    """
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -178,29 +217,43 @@ async def chat_completion(
         endpoint = f"{model_url.rstrip('/')}/v1/chat/completions"
         request_headers = headers
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(endpoint, headers=request_headers, json=body)
-    except httpx.TimeoutException as exc:
-        raise AIRequestError(f"AI 请求超时: {exc}") from exc
-    except httpx.HTTPError as exc:
-        raise AIRequestError(f"AI 网络错误: {exc}") from exc
-
-    if response.status_code >= 400:
-        body_preview = response.text[:300] if response.content else ""
-        raise AIRequestError(
-            f"AI 返回 {response.status_code}: {body_preview}"
-        )
-
-    try:
-        payload = response.json()
-    except json.JSONDecodeError as exc:
-        raise AIRequestError("AI 响应不是有效的 JSON") from exc
-
-    text = _extract_text_from_response(provider, payload)
-    if not text:
-        raise AIRequestError("AI 响应内容为空")
-    return text
+    last_exc: Optional[AIRequestError] = None
+    for attempt in range(1, max(1, retries) + 2):  # attempts = retries + 1
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    endpoint, headers=request_headers, json=body
+                )
+        except httpx.TimeoutException as exc:
+            last_exc = AIRequestError(f"AI 请求超时: {exc}")
+        except httpx.HTTPError as exc:
+            last_exc = AIRequestError(f"AI 网络错误: {exc}")
+        else:
+            if response.status_code >= 400:
+                body_preview = response.text[:300] if response.content else ""
+                last_exc = AIRequestError(
+                    f"AI 返回 {response.status_code}: {body_preview}"
+                )
+            else:
+                try:
+                    payload = response.json()
+                except json.JSONDecodeError as exc:
+                    last_exc = AIRequestError("AI 响应不是有效的 JSON")
+                else:
+                    text = _extract_text_from_response(provider, payload)
+                    if not text:
+                        last_exc = AIRequestError("AI 响应内容为空")
+                    else:
+                        return text
+        # 4xx errors are not retriable (they'll fail again); everything
+        # else (timeout, network, 5xx, empty content) is worth retrying.
+        if last_exc and "AI 返回 4" in last_exc.args[0]:
+            break
+        if attempt <= max(1, retries):
+            import asyncio as _asyncio
+            await _asyncio.sleep(retry_base_delay * (2 ** (attempt - 1)))
+    assert last_exc is not None  # loop only exits via return or via last_exc
+    raise last_exc
 
 
 _JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}")

@@ -16,20 +16,20 @@ function PromptListItem({ prompt, selected, onSelect, onToggle }) {
   return (
     <button
       type="button"
-      className={`atelier-item ${selected ? 'selected' : ''} ${prompt.is_enabled ? '' : 'disabled'}`}
+      className={`library-item ${selected ? 'selected' : ''} ${prompt.is_enabled ? '' : 'disabled'}`}
       onClick={() => onSelect(prompt.id)}
     >
-      <div className="atelier-item-head">
-        <h4 className="atelier-item-name" title={prompt.name}>
+      <div className="library-item-head">
+        <h4 className="library-item-name" title={prompt.name}>
           {prompt.name}
         </h4>
-        {prompt.is_builtin && <span className="atelier-pill">内置</span>}
+        {prompt.is_builtin && <span className="status-pill">内置</span>}
       </div>
-      <span className="atelier-item-key">{prompt.key}</span>
+      <span className="library-item-key">{prompt.key}</span>
       {prompt.description && (
-        <p className="atelier-item-desc">{prompt.description}</p>
+        <p className="library-item-desc">{prompt.description}</p>
       )}
-      <div className="atelier-item-foot">
+      <div className="library-item-foot">
         <span>
           {prompt.is_enabled ? '已启用' : '已禁用'}
         </span>
@@ -95,12 +95,12 @@ function PromptEditor({ prompt, dirty, onChange, onSave, onReset, saving, resett
     <div className="prompt-editor">
       <div className="prompt-editor-head">
         <div className="prompt-editor-title">
-          <span className="atelier-eyebrow">Prompt Template</span>
+          <span className="library-main-eyebrow">Prompt Template</span>
           <h2>{prompt.name || '提示词详情'}</h2>
           <span className="prompt-editor-key">{prompt.key}</span>
         </div>
         <div className="prompt-editor-meta">
-          {prompt.is_builtin && <span className="atelier-pill">内置</span>}
+          {prompt.is_builtin && <span className="status-pill">内置</span>}
           <span
             className={`status-dot ${form.is_enabled ? 'success' : 'error-dot'}`}
             title={form.is_enabled ? '已启用' : '已禁用'}
@@ -557,39 +557,39 @@ export function PromptManagerPanel() {
   }
 
   return (
-    <div className="atelier-shell">
-      <aside className="atelier-aside">
-        <header className="atelier-aside-head">
-          <span className="atelier-eyebrow">Prompt Library</span>
-          <h2 className="atelier-title">提示词</h2>
-          <p className="atelier-lede">
+    <div className="library-shell">
+      <aside className="library-aside">
+        <header className="library-aside-head">
+          <span className="library-aside-eyebrow">Prompt Library</span>
+          <h2 className="library-aside-title">提示词</h2>
+          <p className="library-aside-lede">
             查看和自定义所有发送给大模型的提示词。点击列表项查看与编辑；列表右侧开关可即时启停。
           </p>
-          <div className="atelier-meta-grid">
-            <div className="atelier-meta-cell">
-              <span className="atelier-meta-value">{stats.total}</span>
-              <span className="atelier-meta-label">模板</span>
+          <div className="library-aside-meta">
+            <div className="library-meta-cell">
+              <span className="library-meta-value">{stats.total}</span>
+              <span className="library-meta-label">模板</span>
             </div>
-            <div className="atelier-meta-cell">
-              <span className="atelier-meta-value">{stats.enabled}</span>
-              <span className="atelier-meta-label">启用</span>
+            <div className="library-meta-cell">
+              <span className="library-meta-value">{stats.enabled}</span>
+              <span className="library-meta-label">启用</span>
             </div>
-            <div className="atelier-meta-cell">
-              <span className="atelier-meta-value">{stats.builtin}</span>
-              <span className="atelier-meta-label">内置</span>
+            <div className="library-meta-cell">
+              <span className="library-meta-value">{stats.builtin}</span>
+              <span className="library-meta-label">内置</span>
             </div>
           </div>
         </header>
 
-        <div className="atelier-aside-tools">
-          <label className="atelier-search">
+        <div className="library-aside-tools">
+          <label className="project-search-bar" style={{ marginBottom: 0 }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-              <circle cx="11" cy="11" r="8" stroke="currentColor" strokeWidth="2" />
-              <path d="M21 21l-4.35-4.35" stroke="currentColor" strokeWidth="2" />
+              <path d="M3 5h18M3 12h18M3 19h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
             <select
               value={filterCategory}
               onChange={(e) => setFilterCategory(e.target.value)}
+              style={{ background: 'transparent', border: 'none', outline: 'none', color: 'inherit', font: 'inherit', width: '100%' }}
             >
               <option value="all">全部分类</option>
               {categories.map((c) => (
@@ -599,9 +599,10 @@ export function PromptManagerPanel() {
               ))}
             </select>
           </label>
-          <label className="atelier-search">
+          <label className="project-search-bar" style={{ marginBottom: 0 }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-              <path d="M3 5h18M3 12h18M3 19h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              <circle cx="11" cy="11" r="8" stroke="currentColor" strokeWidth="2" />
+              <path d="M21 21l-4.35-4.35" stroke="currentColor" strokeWidth="2" />
             </svg>
             <input
               type="text"
@@ -612,9 +613,9 @@ export function PromptManagerPanel() {
           </label>
         </div>
 
-        <div className="atelier-aside-list">
+        <div className="library-aside-list">
           {visiblePrompts.length === 0 ? (
-            <div className="atelier-list-empty">
+            <div className="library-list-empty">
               {prompts.length === 0
                 ? '尚无任何提示词模板。'
                 : '没有匹配的提示词，请调整筛选条件。'}
@@ -633,26 +634,26 @@ export function PromptManagerPanel() {
         </div>
       </aside>
 
-      <section className="atelier-main">
-        <div className="atelier-main-head">
-          <div className="atelier-main-head-left">
-            <span className="atelier-eyebrow">Prompt Workspace</span>
-            <h1 className="atelier-main-title">
+      <section className="library-main">
+        <div className="library-main-head">
+          <div className="library-main-head-left">
+            <span className="library-main-eyebrow">Prompt Workspace</span>
+            <h1 className="library-main-title">
               {selected ? selected.name : '提示词管理'}
             </h1>
-            <p className="atelier-main-subtitle">
+            <p className="library-main-subtitle">
               {selected
                 ? '编辑当前提示词的内容、行为参数与温度。保存后立即生效；内置模板可一键恢复默认。'
                 : '从左侧选择一条提示词进行查看或编辑。'}
             </p>
           </div>
-          <div className="atelier-main-head-right">
+          <div className="library-main-head-right">
             <button
               type="button"
-              className="new-config-btn"
+              className="new-project-btn"
               onClick={() => setCreating(true)}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
                 <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" />
               </svg>
               新建提示词
@@ -680,12 +681,12 @@ export function PromptManagerPanel() {
             />
           </div>
         ) : (
-          <div className="atelier-empty">
-            <div className="atelier-empty-mark">词</div>
-            <h3 className="atelier-empty-title">尚未选择任何提示词</h3>
-            <p className="atelier-empty-msg">
-              从左侧列表选中一条提示词以查看与编辑。
-            </p>
+          <div className="library-empty">
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
+              <path d="M4 5h16M4 12h16M4 19h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            <p>尚未选择任何提示词</p>
+            <span>从左侧列表选中一条提示词以查看与编辑。</span>
           </div>
         )}
 

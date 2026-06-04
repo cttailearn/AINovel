@@ -5,10 +5,10 @@ from database import (
     delete_config_by_id,
     get_all_configs,
     get_config_by_id,
-    get_enabled_configs,
-    save_config,
+    get_enabled_configs_by_capability,
     toggle_config_enabled,
     update_config,
+    save_config,
 )
 from schemas import ModelConfig
 
@@ -20,7 +20,11 @@ async def list_all_configs() -> List[Dict[str, Any]]:
 
 
 async def list_enabled_configs() -> List[Dict[str, Any]]:
-    return await get_enabled_configs()
+    return await get_enabled_configs_by_capability("chat")
+
+
+async def list_enabled_image_configs() -> List[Dict[str, Any]]:
+    return await get_enabled_configs_by_capability("image")
 
 
 async def get_config(config_id: int) -> Optional[Dict[str, Any]]:
@@ -35,6 +39,7 @@ async def create_model(config: ModelConfig) -> Dict[str, Any]:
         config.api_key,
         config.model_name,
         int(bool(config.enabled)),
+        config.capability or "chat",
     )
     return {
         "id": config_id,
@@ -54,6 +59,7 @@ async def update_model(config_id: int, config: ModelConfig) -> Optional[Dict[str
         config.api_key,
         config.model_name,
         int(bool(config.enabled)),
+        config.capability or "chat",
     )
     return {"message": f"Configuration '{config.name}' updated successfully"}
 

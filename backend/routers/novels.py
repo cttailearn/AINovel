@@ -17,6 +17,7 @@ from schemas import (
     ChapterDetail,
     KnowledgeGraphRequest,
     KnowledgeGraphResponse,
+    KnowledgeGraphValidation,
     NovelDetail,
     NovelListResponse,
     NovelUpdate,
@@ -31,6 +32,7 @@ from services import (
     delete_novel,
     extract_knowledge_graph,
     extract_knowledge_graph_streaming,
+    extract_knowledge_graph_v2,
     get_chapter,
     get_novel_detail,
     get_raw_content,
@@ -293,6 +295,140 @@ async def extract_knowledge_graph_stream_endpoint(
                     break
                 yield _sse_format(kind, payload_obj)
             # Drain a final cancellation check.
+            if not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=1.0)
+                except asyncio.TimeoutError:
+                    task.cancel()
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent v2 endpoints (ExtractorAgent + MergeValidatorAgent)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{novel_id}/knowledge-graph/v2",
+    response_model=KnowledgeGraphResponse,
+)
+async def extract_knowledge_graph_v2_endpoint(
+    novel_id: int, payload: KnowledgeGraphRequest
+):
+    """Run the multi-agent pipeline (ExtractorAgent + MergeValidatorAgent).
+
+    Equivalent to ``/knowledge-graph`` but goes through the new agent
+    abstraction and returns a ``validation`` block (issues, dedup log,
+    coverage report).
+    """
+    if not await get_novel_detail(novel_id):
+        raise HTTPException(status_code=404, detail="小说不存在")
+    try:
+        result = await extract_knowledge_graph_v2(
+            novel_id,
+            model_config_id=payload.model_config_id,
+            chunk_size=payload.chunk_size,
+            max_concurrency=payload.max_concurrency,
+            run_validator=payload.run_validator,
+            run_llm_dedup=payload.run_llm_dedup,
+            run_llm_completeness=payload.run_llm_completeness,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("KG v2 extraction failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="知识图谱 v2 构建失败，请稍后重试"
+        )
+
+    stats = result["stats"]
+    summary = (
+        f"v2 抽取完成：{stats['characters']} 位人物、{stats['events']} 个事件、"
+        f"{stats['participations']} 条参与、{stats['character_relations']} 条人物关系、"
+        f"{stats['event_relations']} 条事件关系"
+    )
+    validation = result.get("validation")
+    return KnowledgeGraphResponse(
+        success=True,
+        message=summary,
+        model=result.get("model"),
+        chunks_processed=result.get("chunks_processed", 0),
+        characters=result["characters"],
+        events=result["events"],
+        character_event_relations=result["character_event_relations"],
+        character_relations=result["character_relations"],
+        event_relations=result["event_relations"],
+        stats=stats,
+        validation=(
+            KnowledgeGraphValidation(**validation) if validation else None
+        ),
+    )
+
+
+@router.post("/{novel_id}/knowledge-graph/v2/stream")
+async def extract_knowledge_graph_v2_stream_endpoint(
+    novel_id: int, payload: KnowledgeGraphRequest
+):
+    """SSE streaming version of the v2 pipeline.
+
+    Emits the same event types as the legacy stream endpoint, plus a
+    final ``validation`` event carrying the validator's report.
+    """
+    if not await get_novel_detail(novel_id):
+        raise HTTPException(status_code=404, detail="小说不存在")
+
+    progress_queue: asyncio.Queue = asyncio.Queue()
+
+    def _emit_progress(p: Dict[str, Any]) -> None:
+        progress_queue.put_nowait(("progress", p))
+
+    def _emit_partial(key: str, items: List[Dict[str, Any]]) -> None:
+        progress_queue.put_nowait(("partial", {key: items}))
+
+    async def _run_extraction() -> None:
+        try:
+            result = await extract_knowledge_graph_v2(
+                novel_id,
+                model_config_id=payload.model_config_id,
+                chunk_size=payload.chunk_size,
+                max_concurrency=payload.max_concurrency,
+                run_validator=payload.run_validator,
+                run_llm_dedup=payload.run_llm_dedup,
+                run_llm_completeness=payload.run_llm_completeness,
+                on_progress=_emit_progress,
+                on_partial=_emit_partial,
+            )
+            progress_queue.put_nowait(("done", result))
+            # Send the validation report as a separate event so the
+            # client can render the issue panel even after ``done``.
+            if result.get("validation"):
+                progress_queue.put_nowait(("validation", result["validation"]))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("KG v2 streaming failed: %s", exc)
+            progress_queue.put_nowait(("error", str(exc)))
+        finally:
+            progress_queue.put_nowait(("__end__", None))
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        task = asyncio.create_task(_run_extraction())
+        try:
+            while True:
+                kind, payload_obj = await progress_queue.get()
+                if kind == "__end__":
+                    break
+                yield _sse_format(kind, payload_obj)
             if not task.done():
                 try:
                     await asyncio.wait_for(task, timeout=1.0)

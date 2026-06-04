@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ApiError, api } from '../api/client.js';
 import { ConfirmDialog } from './Modal/ConfirmDialog.jsx';
 import { useToast } from './Toast/ToastProvider.jsx';
@@ -8,6 +8,59 @@ const PROVIDER_OPTIONS = [
   { value: 'openai', label: 'OpenAI', icon: '🔮', description: 'ChatGPT API' },
   { value: 'custom', label: 'Custom', icon: '⚙️', description: 'Custom API' },
 ];
+
+const CAPABILITY_OPTIONS = [
+  {
+    value: 'chat',
+    label: '对话/文本',
+    icon: '💬',
+    description: '聊天/抽取/摘要等文本生成',
+  },
+  {
+    value: 'image',
+    label: '图像生成',
+    icon: '🎨',
+    description: '文生图、图生图（MiniMax 等）',
+  },
+];
+
+// 图像生成模型：每个提供商有固定的 Base URL、协议和常用模型建议。
+// 用户选择提供商、填入 API Key 与模型名称即可（模型名称可自由填写，
+// 列表里的值仅作 datalist 自动补全建议）。
+const IMAGE_PROVIDERS = [
+  {
+    value: 'minimax',
+    label: 'MiniMax（海螺 AI）',
+    icon: '🐶',
+    baseUrl: 'https://api.minimaxi.com',
+    models: ['image-01', 'image-01-live'],
+    note: 'image-01 / image-01-live 均支持文生图与图生图。',
+  },
+  {
+    value: 'dashscope',
+    label: '阿里云百炼（DashScope）',
+    icon: '☁️',
+    baseUrl: 'https://dashscope.aliyuncs.com',
+    models: ['qwen-image-2.0-pro', 'qwen-image-2.0'],
+    note: 'qwen-image-2.0-pro 等多模态生图模型，支持多图参考。',
+  },
+];
+
+function findImageProvider(provider, modelUrl) {
+  if (!provider) return null;
+  // First, match by stored provider value (e.g. "minimax").
+  const direct = IMAGE_PROVIDERS.find((p) => p.value === provider);
+  if (direct) return direct;
+  // Fallback: match by base URL so configs created before this list still
+  // resolve to the right provider.
+  if (modelUrl) {
+    const byUrl = IMAGE_PROVIDERS.find(
+      (p) => p.baseUrl.replace(/\/+$/, '') === modelUrl.replace(/\/+$/, ''),
+    );
+    if (byUrl) return byUrl;
+  }
+  return null;
+}
 
 function ConfigList({ configs, selectedId, onSelect, onToggle, onDelete }) {
   return (
@@ -23,51 +76,67 @@ function ConfigList({ configs, selectedId, onSelect, onToggle, onDelete }) {
             <span>点击下方添加新模型开始配置</span>
           </div>
         ) : (
-          configs.map((config) => (
-            <div
-              key={config.id}
-              className={`config-list-item ${selectedId === config.id ? 'selected' : ''} ${config.enabled ? 'enabled' : 'disabled'}`}
-              onClick={() => onSelect(config.id)}
-            >
-              <div className="config-item-main">
-                <span className="config-item-icon">
-                  {PROVIDER_OPTIONS.find((p) => p.value === config.provider)?.icon || '⚙️'}
-                </span>
-                <div className="config-item-info">
-                  <span className="config-item-name">{config.name || config.provider}</span>
-                  <span className="config-item-model">{config.model_name}</span>
+          configs.map((config) => {
+            const isImage = (config.capability || 'chat') === 'image';
+            const imageProv = isImage
+              ? findImageProvider(config.provider, config.model_url)
+              : null;
+            const icon = isImage
+              ? imageProv?.icon || '🎨'
+              : PROVIDER_OPTIONS.find((p) => p.value === config.provider)?.icon || '⚙️';
+            return (
+              <div
+                key={config.id}
+                className={`config-list-item ${selectedId === config.id ? 'selected' : ''} ${config.enabled ? 'enabled' : 'disabled'}`}
+                onClick={() => onSelect(config.id)}
+              >
+                <div className="config-item-main">
+                  <span className="config-item-icon">{icon}</span>
+                  <div className="config-item-info">
+                    <span className="config-item-name">
+                      {config.name || config.provider}
+                      <span className={`capability-tag ${config.capability || 'chat'}`}>
+                        {(config.capability || 'chat') === 'image' ? '图像' : '对话'}
+                      </span>
+                    </span>
+                    <span className="config-item-model">
+                      {isImage && imageProv
+                        ? `${imageProv.label} · ${config.model_name}`
+                        : config.model_name}
+                    </span>
+                  </div>
+                </div>
+                <div className="config-item-actions">
+                  <button
+                    className={`toggle-btn ${config.enabled ? 'active' : ''}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggle(config.id, config.enabled ? 0 : 1);
+                    }}
+                    title={config.enabled ? '禁用' : '启用'}
+                  >
+                    <span className="toggle-indicator"></span>
+                  </button>
+                  <button
+                    className="delete-btn-small"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete(config);
+                    }}
+                    title="删除"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                      <path
+                        d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      />
+                    </svg>
+                  </button>
                 </div>
               </div>
-              <div className="config-item-actions">
-                <button
-                  className={`toggle-btn ${config.enabled ? 'active' : ''}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggle(config.id, config.enabled ? 0 : 1);
-                  }}
-                  title={config.enabled ? '禁用' : '启用'}
-                >
-                  <span className="toggle-indicator"></span>
-                </button>
-                <button
-                  className="delete-btn-small"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(config);
-                  }}
-                  title="删除"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                    <path
-                      d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                    />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
     </div>
@@ -81,6 +150,7 @@ function ConfigEditor({ config, onSave, onTest }) {
     model_url: '',
     api_key: '',
     model_name: '',
+    capability: 'chat',
     enabled: 1,
   });
   const [testStatus, setTestStatus] = useState(null);
@@ -90,30 +160,51 @@ function ConfigEditor({ config, onSave, onTest }) {
 
   useEffect(() => {
     if (config) {
+      const isImage = (config.capability || 'chat') === 'image';
+      // For image configs, infer the provider from URL if the stored provider
+      // doesn't match any known entry (legacy data).
+      const providerValue = isImage
+        ? (IMAGE_PROVIDERS.find((p) => p.value === config.provider)?.value ||
+            IMAGE_PROVIDERS.find(
+              (p) =>
+                p.baseUrl.replace(/\/+$/, '') ===
+                (config.model_url || '').replace(/\/+$/, ''),
+            )?.value ||
+            IMAGE_PROVIDERS[0].value)
+        : config.provider || PROVIDER_OPTIONS[0].value;
       setFormData({
         id: config.id,
         name: config.name || '',
-        provider: config.provider || '',
+        provider: providerValue,
         model_url: config.model_url || '',
         api_key: config.api_key || '',
         model_name: config.model_name || '',
+        capability: config.capability || 'chat',
         enabled: config.enabled ?? 1,
       });
     } else {
       setFormData({
         name: '',
-        provider: '',
+        provider: PROVIDER_OPTIONS[0].value,
         model_url: '',
         api_key: '',
         model_name: '',
+        capability: 'chat',
         enabled: 1,
       });
     }
     setTestStatus(null);
   }, [config]);
 
-  const providerInfo =
-    PROVIDER_OPTIONS.find((p) => p.value === formData.provider) || PROVIDER_OPTIONS[2];
+  const isImage = (formData.capability || 'chat') === 'image';
+  const imageProvider = useMemo(
+    () => (isImage ? findImageProvider(formData.provider, formData.model_url) : null),
+    [isImage, formData.provider, formData.model_url],
+  );
+  const providerInfo = PROVIDER_OPTIONS.find((p) => p.value === formData.provider);
+  const capabilityInfo =
+    CAPABILITY_OPTIONS.find((c) => c.value === (formData.capability || 'chat')) ||
+    CAPABILITY_OPTIONS[0];
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -125,6 +216,47 @@ function ConfigEditor({ config, onSave, onTest }) {
     setFormData((prev) => ({ ...prev, provider: value }));
   };
 
+  const handleCapabilitySelect = (value) => {
+    setFormData((prev) => {
+      // When switching capability, reset to a valid default for the new mode.
+      if (value === 'image') {
+        const p = IMAGE_PROVIDERS[0];
+        return {
+          ...prev,
+          capability: 'image',
+          provider: p.value,
+          model_url: p.baseUrl,
+          model_name: p.models[0],
+        };
+      }
+      return {
+        ...prev,
+        capability: 'chat',
+        provider: PROVIDER_OPTIONS[0].value,
+      };
+    });
+    setTestStatus(null);
+  };
+
+  const handleImageProviderSelect = (value) => {
+    const p = IMAGE_PROVIDERS.find((x) => x.value === value);
+    if (!p) return;
+    setFormData((prev) => ({
+      ...prev,
+      provider: p.value,
+      model_url: p.baseUrl,
+      // Keep the currently typed model if the new provider offers it as a
+      // suggestion; otherwise fall back to the first suggestion in the list.
+      model_name: p.models.includes(prev.model_name) ? prev.model_name : p.models[0],
+    }));
+    setTestStatus(null);
+  };
+
+  const handleImageModelChange = (value) => {
+    setFormData((prev) => ({ ...prev, model_name: value }));
+    setTestStatus(null);
+  };
+
   const handleTest = async () => {
     if (!formData.model_url || !formData.api_key || !formData.model_name || !formData.provider) {
       setTestStatus({ success: false, message: '请填写所有必填项' });
@@ -133,11 +265,15 @@ function ConfigEditor({ config, onSave, onTest }) {
     setTesting(true);
     setTestStatus(null);
     try {
+      // For image models, the backend uses the provider name to dispatch
+      // (e.g. "minimax" -> /v1/image_generation, "dashscope" -> multimodal
+      // generation). For chat models, the provider is the upstream protocol.
       const result = await api.models.test({
         provider: formData.provider,
         model_url: formData.model_url,
         api_key: formData.api_key,
         model_name: formData.model_name,
+        capability: formData.capability || 'chat',
       });
       setTestStatus(result);
     } catch (err) {
@@ -170,10 +306,10 @@ function ConfigEditor({ config, onSave, onTest }) {
     >
       <div className="editor-header">
         <div className="editor-title">
-          <span className="provider-icon">{providerInfo.icon}</span>
+          <span className="provider-icon">{capabilityInfo.icon}</span>
           <div className="editor-title-text">
             <h2>{config ? formData.name || '编辑模型' : '新建模型'}</h2>
-            <span className="editor-provider">{providerInfo.description}</span>
+            <span className="editor-provider">{capabilityInfo.description}</span>
           </div>
         </div>
         {config && (
@@ -191,59 +327,145 @@ function ConfigEditor({ config, onSave, onTest }) {
           name="name"
           value={formData.name}
           onChange={handleChange}
-          placeholder="我的 Claude API"
+          placeholder={isImage ? '我的 MiniMax 图像模型' : '我的 Claude API'}
         />
       </div>
 
       <div className="form-group">
-        <label>提供商 *</label>
+        <label>能力类型 *</label>
         <div className="provider-selector">
-          {PROVIDER_OPTIONS.map((opt) => (
+          {CAPABILITY_OPTIONS.map((opt) => (
             <button
               key={opt.value}
               type="button"
-              className={`provider-option ${formData.provider === opt.value ? 'selected' : ''}`}
-              onClick={() => handleProviderSelect(opt.value)}
+              className={`provider-option ${(formData.capability || 'chat') === opt.value ? 'selected' : ''}`}
+              onClick={() => handleCapabilitySelect(opt.value)}
             >
               <span className="provider-option-icon">{opt.icon}</span>
               <span className="provider-option-label">{opt.label}</span>
             </button>
           ))}
         </div>
+        <span className="form-hint">
+          {isImage
+            ? '图像生成模型：选择提供商后，URL 与可用模型会自动填充，只需填入 API Key 即可。'
+            : '对话/文本模型：用于聊天、知识图谱抽取、摘要等。'}
+        </span>
       </div>
 
-      <div className="form-group">
-        <label>模型 URL *</label>
-        <input
-          type="text"
-          name="model_url"
-          value={formData.model_url}
-          onChange={handleChange}
-          placeholder="https://api.example.com/v1"
-        />
-      </div>
+      {isImage ? (
+        <>
+          <div className="form-group">
+            <label>模型提供商 *</label>
+            <div className="provider-selector">
+              {IMAGE_PROVIDERS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  className={`provider-option ${formData.provider === opt.value ? 'selected' : ''}`}
+                  onClick={() => handleImageProviderSelect(opt.value)}
+                >
+                  <span className="provider-option-icon">{opt.icon}</span>
+                  <span className="provider-option-label">{opt.label}</span>
+                </button>
+              ))}
+            </div>
+            {imageProvider && (
+              <span className="form-hint">
+                接口地址：<code>{imageProvider.baseUrl}</code>
+              </span>
+            )}
+          </div>
 
-      <div className="form-group">
-        <label>API 密钥 *</label>
-        <input
-          type="password"
-          name="api_key"
-          value={formData.api_key}
-          onChange={handleChange}
-          placeholder="sk-..."
-        />
-      </div>
+          <div className="form-group">
+            <label>模型名称 *</label>
+            <input
+              type="text"
+              name="model_name"
+              value={formData.model_name}
+              onChange={(e) => handleImageModelChange(e.target.value)}
+              list={imageProvider ? `models-${imageProvider.value}` : undefined}
+              placeholder={
+                imageProvider?.models?.[0] || '例如：image-01'
+              }
+            />
+            {imageProvider && (
+              <datalist id={`models-${imageProvider.value}`}>
+                {imageProvider.models.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            )}
+            <span className="form-hint">
+              {imageProvider?.note ||
+                '可选择下方建议或自行输入新模型名称。'}
+            </span>
+          </div>
 
-      <div className="form-group">
-        <label>模型名称 *</label>
-        <input
-          type="text"
-          name="model_name"
-          value={formData.model_name}
-          onChange={handleChange}
-          placeholder="gpt-4, claude-3-5-sonnet, 等"
-        />
-      </div>
+          <div className="form-group">
+            <label>API 密钥 *</label>
+            <input
+              type="password"
+              name="api_key"
+              value={formData.api_key}
+              onChange={handleChange}
+              placeholder="eyJ..."
+            />
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="form-group">
+            <label>提供商 *</label>
+            <div className="provider-selector">
+              {PROVIDER_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  className={`provider-option ${formData.provider === opt.value ? 'selected' : ''}`}
+                  onClick={() => handleProviderSelect(opt.value)}
+                >
+                  <span className="provider-option-icon">{opt.icon}</span>
+                  <span className="provider-option-label">{opt.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>模型 URL *</label>
+            <input
+              type="text"
+              name="model_url"
+              value={formData.model_url}
+              onChange={handleChange}
+              placeholder="https://api.example.com/v1"
+            />
+          </div>
+
+          <div className="form-group">
+            <label>API 密钥 *</label>
+            <input
+              type="password"
+              name="api_key"
+              value={formData.api_key}
+              onChange={handleChange}
+              placeholder="sk-..."
+            />
+          </div>
+
+          <div className="form-group">
+            <label>模型名称 *</label>
+            <input
+              type="text"
+              name="model_name"
+              value={formData.model_name}
+              onChange={handleChange}
+              placeholder="gpt-4, claude-3-5-sonnet, 等"
+            />
+          </div>
+        </>
+      )}
 
       <div className="form-group toggle-group">
         <label>启用</label>

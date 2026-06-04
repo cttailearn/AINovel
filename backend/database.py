@@ -21,6 +21,7 @@ SCHEMA_STATEMENTS: List[str] = [
         model_url TEXT NOT NULL,
         api_key TEXT NOT NULL,
         model_name TEXT NOT NULL,
+        capability TEXT NOT NULL DEFAULT 'chat',
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -179,6 +180,14 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
         await db.execute("DROP TABLE characters")
         logger.info("Migration: dropped legacy characters table")
 
+    # Add capability column to model_configs if missing.
+    model_columns = await _get_table_columns(db, "model_configs")
+    if model_columns and "capability" not in model_columns:
+        await db.execute(
+            "ALTER TABLE model_configs ADD COLUMN capability TEXT NOT NULL DEFAULT 'chat'"
+        )
+        logger.info("Migration: added model_configs.capability column")
+
 
 @asynccontextmanager
 async def get_db() -> AsyncIterator[aiosqlite.Connection]:
@@ -220,6 +229,16 @@ async def get_enabled_configs() -> List[Dict[str, Any]]:
         return _rows_to_dicts(await cur.fetchall())
 
 
+async def get_enabled_configs_by_capability(capability: str) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM model_configs WHERE enabled = 1 AND capability = ? "
+            "ORDER BY created_at DESC, id DESC",
+            (capability,),
+        )
+        return _rows_to_dicts(await cur.fetchall())
+
+
 async def get_config_by_id(config_id: int) -> Optional[Dict[str, Any]]:
     async with get_db() as db:
         cur = await db.execute(
@@ -236,15 +255,16 @@ async def save_config(
     api_key: str,
     model_name: str,
     enabled: int = 1,
+    capability: str = "chat",
 ) -> int:
     async with get_db() as db:
         cur = await db.execute(
             """
             INSERT INTO model_configs
-                (name, provider, model_url, api_key, model_name, enabled)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (name, provider, model_url, api_key, model_name, capability, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (name, provider, model_url, api_key, model_name, enabled),
+            (name, provider, model_url, api_key, model_name, capability, enabled),
         )
         await db.commit()
         return cur.lastrowid or 0
@@ -258,6 +278,7 @@ async def update_config(
     api_key: str,
     model_name: str,
     enabled: int,
+    capability: str = "chat",
 ) -> bool:
     async with get_db() as db:
         cur = await db.execute(
@@ -268,11 +289,12 @@ async def update_config(
                 model_url = ?,
                 api_key = ?,
                 model_name = ?,
+                capability = ?,
                 enabled = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (name, provider, model_url, api_key, model_name, enabled, config_id),
+            (name, provider, model_url, api_key, model_name, capability, enabled, config_id),
         )
         await db.commit()
         return cur.rowcount > 0

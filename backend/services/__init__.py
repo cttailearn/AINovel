@@ -1,8 +1,10 @@
 from . import file_service, prompt_service
 from .ai_service import test_connection
+from .image_service import generate_images, upload_reference_image
 from .kg_service import (
     extract_knowledge_graph,
     extract_knowledge_graph_streaming,
+    extract_knowledge_graph_v2,
     list_knowledge_graph,
 )
 from .model_service import (
@@ -11,6 +13,7 @@ from .model_service import (
     get_config,
     list_all_configs,
     list_enabled_configs,
+    list_enabled_image_configs,
     toggle_model,
     update_model,
 )
@@ -33,8 +36,11 @@ __all__ = [
     "file_service",
     "prompt_service",
     "test_connection",
+    "generate_images",
+    "upload_reference_image",
     "list_all_configs",
     "list_enabled_configs",
+    "list_enabled_image_configs",
     "get_config",
     "create_model",
     "update_model",
@@ -54,5 +60,6 @@ __all__ = [
     "ParseError",
     "extract_knowledge_graph",
     "extract_knowledge_graph_streaming",
+    "extract_knowledge_graph_v2",
     "list_knowledge_graph",
 ]

@@ -307,6 +307,17 @@ export const api = {
         onEvent,
         signal,
       }),
+    extractCharactersV2: (id, payload, options) =>
+      apiRequest(`/novels/${id}/knowledge-graph/v2`, {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
+    extractCharactersStreamV2: (id, payload, { onEvent, signal } = {}) =>
+      postStream(`/novels/${id}/knowledge-graph/v2/stream`, payload, {
+        onEvent,
+        signal,
+      }),
     getKgStats: (id, options) =>
       apiRequest(`/novels/${id}/kg-stats`, options),
   },
@@ -321,5 +332,16 @@ export const api = {
       apiRequest('/prompts', { method: 'POST', body: payload, ...options }),
     remove: (id, options) =>
       apiRequest(`/prompts/${id}`, { method: 'DELETE', ...options }),
+  },
+  image: {
+    listModels: (options) => apiRequest('/image/models', options),
+    listEnabledModels: (options) => apiRequest('/image/models/enabled', options),
+    generate: (payload, options) =>
+      apiRequest('/image/generate', { method: 'POST', body: payload, ...options }),
+    uploadReference: (file, { signal } = {}) =>
+      uploadWithProgress('/image/reference-upload', file, {
+        fieldName: 'file',
+        signal,
+      }),
   },
 };

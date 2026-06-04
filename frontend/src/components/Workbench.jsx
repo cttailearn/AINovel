@@ -645,7 +645,7 @@ function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged }) 
   );
 }
 
-export function Workbench({ models }) {
+export function Workbench({ models, topSearch = '' }) {
   const toast = useToast();
   const [view, setView] = useState('list');
   const [selectedId, setSelectedId] = useState(null);
@@ -654,7 +654,6 @@ export function Workbench({ models }) {
   const [progress, setProgress] = useState(null);
   const [novels, setNovels] = useState([]);
   const [novelsLoading, setNovelsLoading] = useState(true);
-  const [search, setSearch] = useState('');
   const [pendingDelete, setPendingDelete] = useState(null);
   const [toDeleteId, setToDeleteId] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -762,7 +761,7 @@ export function Workbench({ models }) {
   }
 
   const filtered = novels.filter((n) => {
-    const q = search.trim().toLowerCase();
+    const q = topSearch.trim().toLowerCase();
     if (!q) return true;
     return (
       n.title.toLowerCase().includes(q) ||
@@ -773,35 +772,24 @@ export function Workbench({ models }) {
 
   return (
     <div className="workbench-content">
-      <header className="page-header">
-        <div className="page-header-text">
-          <h1>我的项目</h1>
-          <p>管理您所有的智能小说项目</p>
-        </div>
-        <button
-          type="button"
-          className="new-project-btn"
-          onClick={() => setUploadOpen(true)}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-            <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" />
-          </svg>
-          新建项目
-        </button>
-      </header>
-
       {novels.length > 0 && (
-        <div className="project-search-bar">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-            <circle cx="11" cy="11" r="8" stroke="currentColor" strokeWidth="2" />
-            <path d="M21 21l-4.35-4.35" stroke="currentColor" strokeWidth="2" />
-          </svg>
-          <input
-            type="text"
-            placeholder="搜索项目标题、作者或内容..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+        <div className="page-actions">
+          <button
+            type="button"
+            className="new-project-btn"
+            onClick={() => setUploadOpen(true)}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" strokeLinecap="round" />
+            </svg>
+            新建项目
+          </button>
+        </div>
+      )}
+
+      {novels.length > 0 && topSearch && (
+        <div className="filter-summary">
+          正在显示包含 <strong>"{topSearch}"</strong> 的 {filtered.length} 个项目
         </div>
       )}
 
@@ -812,19 +800,19 @@ export function Workbench({ models }) {
         </div>
       ) : novels.length === 0 ? (
         <div className="empty-projects">
-          <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
-            <path d="M4 19.5A2.5 2.5 0 016.5 17H20" stroke="currentColor" strokeWidth="1.5" />
-            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" stroke="currentColor" strokeWidth="1.5" />
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
+            <path d="M4 19.5A2.5 2.5 0 016.5 17H20" stroke="currentColor" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" stroke="currentColor" />
           </svg>
           <p>还没有任何项目</p>
-          <span>点击右上角「新建项目」上传你的第一本小说</span>
+          <span>点击下方按钮上传你的第一本 TXT 小说</span>
           <button
             type="button"
             className="new-project-btn"
             onClick={() => setUploadOpen(true)}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-              <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" />
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" strokeLinecap="round" />
             </svg>
             新建项目
           </button>

@@ -121,7 +121,182 @@ const TABS = [
   { key: 'characters', label: '人物' },
   { key: 'events', label: '事件' },
   { key: 'relations', label: '关系' },
+  { key: 'validation', label: '校验' },
 ];
+
+function ValidationPanel({ validation, useV2 }) {
+  if (!useV2) {
+    return (
+      <div className="kg-validation-empty">
+        <p>未启用 v2 校验</p>
+        <span>勾选工具栏「v2 多 Agent 校验」并构建,即可看到抽取质量报告</span>
+      </div>
+    );
+  }
+  if (!validation) {
+    return (
+      <div className="kg-validation-empty">
+        <p>尚无校验报告</p>
+        <span>点击「构建知识图谱」后, 校验 Agent 会自动生成报告</span>
+      </div>
+    );
+  }
+  const issues = validation.issues || [];
+  const dedup = validation.dedup_log || [];
+  const cov = validation.coverage || {};
+  const byCode = issues.reduce((acc, it) => {
+    acc[it.code] = (acc[it.code] || 0) + 1;
+    return acc;
+  }, {});
+  const errors = issues.filter((i) => i.severity === 'error').length;
+  const warns = issues.filter((i) => i.severity === 'warn').length;
+  const perEvent = cov.per_event_participant_count || {};
+  const orphanEvents = cov.events_without_participant || [];
+  return (
+    <div className="kg-validation">
+      <div className="kg-validation-summary">
+        <div>
+          <span className="summary-label">问题</span>
+          <strong>{issues.length}</strong>
+          <span className="summary-sub">
+            (错误 {errors} · 警告 {warns})
+          </span>
+        </div>
+        <div>
+          <span className="summary-label">同义合并</span>
+          <strong>{dedup.length}</strong>
+        </div>
+        <div>
+          <span className="summary-label">参与缺失事件</span>
+          <strong>{orphanEvents.length}</strong>
+        </div>
+        <div>
+          <span className="summary-label">事件总数</span>
+          <strong>{cov.events ?? '-'}</strong>
+        </div>
+      </div>
+
+      {Object.keys(byCode).length > 0 && (
+        <section className="kg-validation-section">
+          <h4>问题分类</h4>
+          <ul className="kg-validation-codes">
+            {Object.entries(byCode)
+              .sort((a, b) => b[1] - a[1])
+              .map(([code, count]) => (
+                <li key={code}>
+                  <span className="kg-validation-code">{code}</span>
+                  <span className="kg-validation-count">{count}</span>
+                </li>
+              ))}
+          </ul>
+        </section>
+      )}
+
+      {issues.length > 0 && (
+        <section className="kg-validation-section">
+          <h4>问题详情</h4>
+          <ul className="kg-validation-list">
+            {issues.map((it, i) => (
+              <li
+                key={i}
+                className={`kg-validation-item kg-validation-${it.severity}`}
+              >
+                <span className={`kg-validation-pill kg-validation-pill-${it.severity}`}>
+                  {it.severity}
+                </span>
+                <span className="kg-validation-code">{it.code}</span>
+                <span className="kg-validation-msg">{it.message}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {dedup.length > 0 && (
+        <section className="kg-validation-section">
+          <h4>同义合并记录</h4>
+          <ul className="kg-validation-dedup">
+            {dedup.map((d, i) => (
+              <li key={i}>
+                <strong>{d.kept}</strong> ← {d.names?.join(' / ')}
+                <span className="kg-validation-sub">
+                  合并自 {d.merged_from?.join(', ')}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {perEvent && Object.keys(perEvent).length > 0 && (
+        <section className="kg-validation-section">
+          <h4>每事件参与数</h4>
+          <ul className="kg-validation-coverage">
+            {Object.entries(perEvent).map(([eid, cnt]) => (
+              <li
+                key={eid}
+                className={cnt === 0 ? 'kg-validation-coverage-zero' : ''}
+              >
+                <span>{eid}</span>
+                <strong>{cnt}</strong>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {cov.completeness && (
+        <section className="kg-validation-section">
+          <h4>覆盖度核查 (LLM)</h4>
+          <div className="kg-validation-completeness">
+            <div>
+              <span className="summary-label">缺失人物</span>
+              <strong>{(cov.completeness.missing_characters || []).length}</strong>
+            </div>
+            <div>
+              <span className="summary-label">缺失事件</span>
+              <strong>{(cov.completeness.missing_events || []).length}</strong>
+            </div>
+            <div>
+              <span className="summary-label">缺失参与</span>
+              <strong>{(cov.completeness.missing_participations || []).length}</strong>
+            </div>
+          </div>
+          {(cov.completeness.missing_characters || []).length > 0 && (
+            <details>
+              <summary>查看缺失人物</summary>
+              <ul>
+                {cov.completeness.missing_characters.map((c, i) => (
+                  <li key={i}>
+                    <strong>{c.name}</strong>
+                    <span className="kg-validation-evidence">
+                      {c.evidence}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {(cov.completeness.missing_events || []).length > 0 && (
+            <details>
+              <summary>查看缺失事件</summary>
+              <ul>
+                {cov.completeness.missing_events.map((e, i) => (
+                  <li key={i}>
+                    <strong>{e.name}</strong>
+                    <span className="kg-validation-evidence">
+                      {e.evidence}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
 
 export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }) {
   const toast = useToast();
@@ -141,6 +316,11 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
   const [updatedAt, setUpdatedAt] = useState(null);
   const [activeTab, setActiveTab] = useState('graph');
   const [relSubTab, setRelSubTab] = useState('participations');
+
+  // v2 (multi-agent) toggles
+  const [useV2, setUseV2] = useState(false);
+  const [runCompleteness, setRunCompleteness] = useState(false);
+  const [validation, setValidation] = useState(null);
 
   // Streaming / live updates
   const [progress, setProgress] = useState(null);
@@ -198,6 +378,7 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
     setProgress({ percent: 0, message: '准备开始…' });
     setPhaseStats({});
     setExtractError(null);
+    setValidation(null);
     setLiveData({
       characters: [],
       events: [],
@@ -212,18 +393,29 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
     setExtracting(true);
 
     try {
-      await api.novels.extractCharactersStream(
+      const requestPayload = {
+        model_config_id: modelConfigId ? Number(modelConfigId) : null,
+        chunk_size: Number(chunkSize),
+        max_concurrency: Number(maxConcurrency),
+        ...(useV2
+          ? { run_validator: true, run_llm_dedup: true, run_llm_completeness: runCompleteness }
+          : {}),
+      };
+      const streamCall = useV2
+        ? api.novels.extractCharactersStreamV2
+        : api.novels.extractCharactersStream;
+
+      await streamCall(
         novelId,
-        {
-          model_config_id: modelConfigId ? Number(modelConfigId) : null,
-          chunk_size: Number(chunkSize),
-          max_concurrency: Number(maxConcurrency),
-        },
+        requestPayload,
         {
           signal: controller.signal,
           onEvent: ({ event, data }) => {
             if (event === 'progress') {
               setProgress(data);
+            } else if (event === 'validation') {
+              // v2-only event: validator report after the run completes.
+              setValidation(data);
             } else if (event === 'partial') {
               const key = Object.keys(data || {})[0];
               if (!key) return;
@@ -251,6 +443,7 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
             } else if (event === 'done') {
               // Final result includes stored entities with `entity_id`.
               const result = data || {};
+              if (result.validation) setValidation(result.validation);
               setData({
                 characters: result.characters || [],
                 events: result.events || [],
@@ -412,6 +605,30 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
             disabled={extracting}
           />
         </div>
+        <div className="toolbar-field small toolbar-toggle">
+          <label>
+            <input
+              type="checkbox"
+              checked={useV2}
+              onChange={(e) => setUseV2(e.target.checked)}
+              disabled={extracting}
+            />
+            <span>v2 多 Agent 校验</span>
+          </label>
+        </div>
+        {useV2 && (
+          <div className="toolbar-field small toolbar-toggle">
+            <label>
+              <input
+                type="checkbox"
+                checked={runCompleteness}
+                onChange={(e) => setRunCompleteness(e.target.checked)}
+                disabled={extracting}
+              />
+              <span>覆盖度核查 (LLM)</span>
+            </label>
+          </div>
+        )}
         <button
           type="button"
           className="extract-btn"
@@ -566,7 +783,7 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
             />
           ))}
         </div>
-      ) : (
+      ) : activeTab === 'relations' ? (
         <div className="kg-rel-block">
           <div className="kg-rel-subtabs">
             <button
@@ -636,7 +853,9 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
             )}
           </ul>
         </div>
-      )}
+      ) : activeTab === 'validation' ? (
+        <ValidationPanel validation={validation} useV2={useV2} />
+      ) : null}
 
       <EntityDetailModal
         open={!!detailSelection}

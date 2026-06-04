@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -9,6 +9,7 @@ class ModelConfig(BaseModel):
     model_url: str = Field(..., min_length=1, max_length=500)
     api_key: str = Field(..., min_length=1, max_length=500)
     model_name: str = Field(..., min_length=1, max_length=200)
+    capability: Literal["chat", "image"] = "chat"
     enabled: bool = True
 
 
@@ -17,6 +18,7 @@ class ConnectionTestRequest(BaseModel):
     model_url: str
     api_key: str
     model_name: str
+    capability: Literal["chat", "image"] = "chat"
 
 
 class ConnectionTestResponse(BaseModel):
@@ -198,6 +200,10 @@ class KnowledgeGraphRequest(BaseModel):
     model_config_id: Optional[int] = Field(default=None, ge=1)
     chunk_size: int = Field(default=8000, ge=1000, le=120_000)
     max_concurrency: int = Field(default=3, ge=1, le=10)
+    # Multi-agent (v2) knobs. Only honoured by /knowledge-graph/v2.
+    run_validator: bool = True
+    run_llm_dedup: bool = True
+    run_llm_completeness: bool = False
 
 
 class KnowledgeGraphEntity(BaseModel):
@@ -224,6 +230,23 @@ class KnowledgeGraphStats(BaseModel):
     chunks_processed: int = 0
 
 
+class ValidationIssueOut(BaseModel):
+    """One issue raised by the MergeValidatorAgent (v2)."""
+
+    severity: str
+    code: str
+    message: str
+    payload: Dict[str, Any] = {}
+
+
+class KnowledgeGraphValidation(BaseModel):
+    """Validation report from the v2 multi-agent pipeline."""
+
+    issues: List[ValidationIssueOut] = []
+    dedup_log: List[Dict[str, Any]] = []
+    coverage: Dict[str, Any] = {}
+
+
 class KnowledgeGraphResponse(BaseModel):
     success: bool
     message: str
@@ -235,4 +258,75 @@ class KnowledgeGraphResponse(BaseModel):
     character_relations: List[KnowledgeGraphRelation] = []
     event_relations: List[KnowledgeGraphRelation] = []
     stats: KnowledgeGraphStats = KnowledgeGraphStats()
+    # Populated only by the v2 endpoint. ``None`` for the legacy endpoint.
+    validation: Optional[KnowledgeGraphValidation] = None
+
+
+# ---------------------------------------------------------------------------
+# Image generation
+# ---------------------------------------------------------------------------
+
+
+class ImageSubjectReference(BaseModel):
+    """Person subject reference for image-to-image (MiniMax)."""
+
+    type: Literal["character"] = "character"
+    image_file: str = Field(
+        ...,
+        description=(
+            "参考图 URL 或 base64 data URI (data:image/jpeg;base64,...)"
+        ),
+    )
+
+
+class ImageStyle(BaseModel):
+    """Optional style hint, only honoured by image-01-live."""
+
+    style_type: Optional[Literal["漫画", "元气", "中世纪", "水彩"]] = None
+    style_weight: Optional[float] = Field(default=None, gt=0.0, le=1.0)
+
+
+class ImageGenerationRequest(BaseModel):
+    model_config_id: Optional[int] = Field(default=None, ge=1)
+    prompt: str = Field(..., min_length=1, max_length=1500)
+    negative_prompt: Optional[str] = Field(default=None, max_length=1500)
+    # 图生图参考 (MiniMax subject_reference / DashScope content[].image)
+    subject_reference: List[ImageSubjectReference] = []
+    style: Optional[ImageStyle] = None
+    aspect_ratio: Optional[str] = Field(
+        default="1:1",
+        description=(
+            "1:1, 16:9, 4:3, 3:2, 2:3, 3:4, 9:16, 21:9 (21:9 仅 image-01)"
+        ),
+    )
+    width: Optional[int] = Field(default=None, ge=512, le=2048)
+    height: Optional[int] = Field(default=None, ge=512, le=2048)
+    response_format: Literal["url", "base64"] = "url"
+    seed: Optional[int] = None
+    n: int = Field(default=1, ge=1, le=9)
+    prompt_optimizer: bool = False
+    aigc_watermark: bool = False
+
+
+class ImageGenerationItem(BaseModel):
+    url: Optional[str] = None
+    b64: Optional[str] = None
+
+
+class ImageGenerationResponse(BaseModel):
+    success: bool
+    message: str
+    model: Optional[str] = None
+    task_id: Optional[str] = None
+    images: List[ImageGenerationItem] = []
+    success_count: int = 0
+    failed_count: int = 0
+
+
+class ImageModelSummary(BaseModel):
+    id: int
+    name: str
+    provider: str
+    model_name: str
+    model_url: str
 

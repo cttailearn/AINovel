@@ -16,7 +16,12 @@ from config import (
     CORS_ORIGINS,
 )
 from database import init_db
-from routers import models_router, novels_router, prompts_router
+from routers import (
+    image_router,
+    models_router,
+    novels_router,
+    prompts_router,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +76,7 @@ async def unhandled_exception_handler(
 app.include_router(models_router)
 app.include_router(novels_router)
 app.include_router(prompts_router)
+app.include_router(image_router)
 
 
 @app.get("/api")
