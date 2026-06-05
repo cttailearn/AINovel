@@ -53,41 +53,14 @@ PROMPT_KEYS = {
 }
 
 
-def _resolve_prompt(phase: str) -> Dict[str, Any]:
-    """Return the active template for ``phase`` (or the bundled default)."""
-    key = PROMPT_KEYS[phase]
-
-    async def _load() -> Optional[Dict[str, Any]]:
-        try:
-            return await prompt_service.get_active_prompt_by_key(key)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to load prompt %s: %s", key, exc)
-            return None
-
-    # ``_resolve_prompt`` is called from a sync context inside build_*
-    # helpers. We resolve via a per-event cache so multiple coroutines can
-    # share the result without re-querying the DB.
-    cached = _resolve_prompt.__dict__.setdefault("_cache", {})
-    if key in cached:
-        return cached[key]
-    # The caller is in an event loop; fall back to the bundled default so the
-    # extraction never blocks waiting on the database. The async loader is
-    # still exposed through ``resolve_prompts_async`` for callers that
-    # want to wait for DB-backed values.
-    default = prompt_service.get_default_prompt(key)
-    if default is None:
-        default = {
-            "system_prompt": "",
-            "user_prompt_template": "",
-            "temperature": 0.3,
-            "max_tokens": 2400,
-        }
-    cached[key] = default
-    return default
-
-
 async def resolve_prompts_async() -> Dict[str, Dict[str, Any]]:
-    """Resolve all KG prompt keys against the DB, with default fallback."""
+    """Resolve all KG prompt keys against the DB, with default fallback.
+
+    The orchestrator (extract_knowledge_graph[_streaming|_v2]) is expected
+    to await this once per extraction and pass the resulting dict to the
+    per-phase runners. The DB-backed user_prompt_template will then flow
+    through to the LLM call (no per-process cache, no stale default).
+    """
     resolved: Dict[str, Dict[str, Any]] = {}
     for phase, key in PROMPT_KEYS.items():
         try:
@@ -103,25 +76,39 @@ async def resolve_prompts_async() -> Dict[str, Dict[str, Any]]:
 
 # ---------------------------------------------------------------------------
 # Prompt builders
+#
+# Each ``build_*_prompt`` accepts a ``prompts`` dict (the output of
+# ``resolve_prompts_async``) so that user edits made via the settings UI
+# actually reach the LLM. The previous implementation routed through a
+# process-local cache that only ever held the in-memory default, which
+# silently dropped every customisation. See kg_service._run_phase and
+# agents.ExtractorAgent for the call sites.
 # ---------------------------------------------------------------------------
 
 
-def build_character_prompt(chunk_text: str) -> str:
-    tmpl = _resolve_prompt("character").get("user_prompt_template", "")
+def build_character_prompt(
+    chunk_text: str, prompts: Dict[str, Dict[str, Any]]
+) -> str:
+    tmpl = prompts["character"].get("user_prompt_template", "")
     return tmpl.format(chunk_text=chunk_text)
 
 
-def build_event_prompt(chunk_text: str, character_list_json: str) -> str:
-    tmpl = _resolve_prompt("event").get("user_prompt_template", "")
+def build_event_prompt(
+    chunk_text: str, character_list_json: str, prompts: Dict[str, Dict[str, Any]]
+) -> str:
+    tmpl = prompts["event"].get("user_prompt_template", "")
     return tmpl.format(
         chunk_text=chunk_text, character_list_json=character_list_json
     )
 
 
 def build_participation_prompt(
-    chunk_text: str, character_list_json: str, event_list_json: str
+    chunk_text: str,
+    character_list_json: str,
+    event_list_json: str,
+    prompts: Dict[str, Dict[str, Any]],
 ) -> str:
-    tmpl = _resolve_prompt("participation").get("user_prompt_template", "")
+    tmpl = prompts["participation"].get("user_prompt_template", "")
     return tmpl.format(
         chunk_text=chunk_text,
         character_list_json=character_list_json,
@@ -129,15 +116,19 @@ def build_participation_prompt(
     )
 
 
-def build_char_relation_prompt(chunk_text: str, character_list_json: str) -> str:
-    tmpl = _resolve_prompt("char_relation").get("user_prompt_template", "")
+def build_char_relation_prompt(
+    chunk_text: str, character_list_json: str, prompts: Dict[str, Dict[str, Any]]
+) -> str:
+    tmpl = prompts["char_relation"].get("user_prompt_template", "")
     return tmpl.format(
         chunk_text=chunk_text, character_list_json=character_list_json
     )
 
 
-def build_event_relation_prompt(chunk_text: str, event_list_json: str) -> str:
-    tmpl = _resolve_prompt("event_relation").get("user_prompt_template", "")
+def build_event_relation_prompt(
+    chunk_text: str, event_list_json: str, prompts: Dict[str, Dict[str, Any]]
+) -> str:
+    tmpl = prompts["event_relation"].get("user_prompt_template", "")
     return tmpl.format(
         chunk_text=chunk_text, event_list_json=event_list_json
     )
@@ -289,6 +280,35 @@ def parse_event_payload(raw: str) -> List[Dict[str, Any]]:
     return cleaned
 
 
+def _passthrough_properties(properties: Any) -> Dict[str, Any]:
+    """Return a cleaned dict from a LLM-emitted properties blob.
+
+    Strings are stripped (with triple-quote trimming); list values are
+    normalised via ``_normalize_attr_value``; empty values are dropped.
+    """
+    if not isinstance(properties, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key, value in properties.items():
+        k = _strip_text(str(key))
+        if not k:
+            continue
+        if isinstance(value, str):
+            v = _strip_text(value)
+        elif isinstance(value, list):
+            v = _normalize_attr_value(value)
+        elif isinstance(value, (int, float, bool)):
+            v = value
+        elif value is None:
+            continue
+        else:
+            v = str(value)
+        if v in (None, "", [], {}):
+            continue
+        out[k] = v
+    return out
+
+
 def parse_participation_payload(raw: str) -> List[Dict[str, Any]]:
     items = _as_list(parse_json_value(raw))
     cleaned: List[Dict[str, Any]] = []
@@ -297,9 +317,9 @@ def parse_participation_payload(raw: str) -> List[Dict[str, Any]]:
         target = _strip_text(str(item.get("target") or ""))
         if not source or not target:
             continue
-        properties = item.get("properties") or {}
-        if not isinstance(properties, dict):
-            properties = {}
+        properties = _passthrough_properties(item.get("properties"))
+        # Preserve the legacy top-level shortcuts so the existing DB
+        # columns (role, action) keep working alongside the JSON blob.
         role = properties.get("角色") or properties.get("role")
         action = properties.get("具体行为") or properties.get("action")
         cleaned.append(
@@ -310,6 +330,7 @@ def parse_participation_payload(raw: str) -> List[Dict[str, Any]]:
                 "target": target,
                 "role": _strip_text(str(role)) if role else None,
                 "action": _strip_text(str(action)) if action else None,
+                "properties": properties,
             }
         )
     return cleaned
@@ -324,9 +345,7 @@ def parse_char_relation_payload(raw: str) -> List[Dict[str, Any]]:
         relation = _strip_text(str(item.get("relation") or ""))
         if not source or not target or not relation:
             continue
-        properties = item.get("properties")
-        if not isinstance(properties, dict):
-            properties = {}
+        properties = _passthrough_properties(item.get("properties"))
         cleaned.append(
             {
                 "source": source,
@@ -349,9 +368,7 @@ def parse_event_relation_payload(raw: str) -> List[Dict[str, Any]]:
             continue
         if relation not in ("包含", "导致"):
             relation = "关联"
-        properties = item.get("properties")
-        if not isinstance(properties, dict):
-            properties = {}
+        properties = _passthrough_properties(item.get("properties"))
         cleaned.append(
             {
                 "source": source,
@@ -612,7 +629,7 @@ def merge_relations(
             if key in seen:
                 continue
             seen.add(key)
-            entry = {
+            entry: Dict[str, Any] = {
                 "source": source,
                 "relation": relation,
                 "target": target,
@@ -620,6 +637,11 @@ def merge_relations(
             if "role" in r or "action" in r:
                 entry["role"] = r.get("role")
                 entry["action"] = r.get("action")
+            # Preserve the full properties blob when present so the
+            # downstream DB / UI can surface arbitrary metadata.
+            properties = r.get("properties")
+            if isinstance(properties, dict) and properties:
+                entry["properties"] = properties
             merged.append(entry)
     return merged
 
@@ -629,14 +651,16 @@ def merge_relations(
 # ---------------------------------------------------------------------------
 
 Parser = Callable[[str], List[Dict[str, Any]]]
+PromptBuilder = Callable[[Dict[str, Any], Dict[str, Dict[str, Any]]], str]
 
 
 async def _run_phase(
     model_cfg: Dict[str, Any],
     chunks: List[Dict[str, Any]],
     *,
+    prompts: Dict[str, Dict[str, Any]],
     system_prompt: str,
-    prompt_builder: Callable[[Dict[str, Any]], str],
+    prompt_builder: PromptBuilder,
     parser: Parser,
     label: str,
     temperature: float = 0.3,
@@ -651,7 +675,7 @@ async def _run_phase(
     async def process_one(chunk: Dict[str, Any]) -> List[Dict[str, Any]]:
         nonlocal done
         async with semaphore:
-            user_prompt = prompt_builder(chunk)
+            user_prompt = prompt_builder(chunk, prompts)
             try:
                 raw = await ai_service.chat_completion(
                     provider=model_cfg["provider"],
@@ -752,6 +776,7 @@ async def extract_knowledge_graph(
     char_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=char_tmpl.get("system_prompt", ""),
         prompt_builder=build_character_prompt,
         parser=parse_character_payload,
@@ -775,8 +800,11 @@ async def extract_knowledge_graph(
     event_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=event_tmpl.get("system_prompt", ""),
-        prompt_builder=lambda c: build_event_prompt(c["content"], character_list_json),
+        prompt_builder=lambda c, _p: build_event_prompt(
+            c["content"], character_list_json, _p
+        ),
         parser=parse_event_payload,
         label="event",
         temperature=float(event_tmpl.get("temperature") or 0.3),
@@ -801,9 +829,10 @@ async def extract_knowledge_graph(
     participation_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=participation_tmpl.get("system_prompt", ""),
-        prompt_builder=lambda c: build_participation_prompt(
-            c["content"], character_list_json, event_list_json
+        prompt_builder=lambda c, _p: build_participation_prompt(
+            c["content"], character_list_json, event_list_json, _p
         ),
         parser=parse_participation_payload,
         label="participation",
@@ -824,8 +853,11 @@ async def extract_knowledge_graph(
     char_rel_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=char_rel_tmpl.get("system_prompt", ""),
-        prompt_builder=lambda c: build_char_relation_prompt(c["content"], character_list_json),
+        prompt_builder=lambda c, _p: build_char_relation_prompt(
+            c["content"], character_list_json, _p
+        ),
         parser=parse_char_relation_payload,
         label="char_relation",
         temperature=float(char_rel_tmpl.get("temperature") or 0.3),
@@ -845,8 +877,11 @@ async def extract_knowledge_graph(
     event_rel_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=event_rel_tmpl.get("system_prompt", ""),
-        prompt_builder=lambda c: build_event_relation_prompt(c["content"], event_list_json),
+        prompt_builder=lambda c, _p: build_event_relation_prompt(
+            c["content"], event_list_json, _p
+        ),
         parser=parse_event_relation_payload,
         label="event_relation",
         temperature=float(event_rel_tmpl.get("temperature") or 0.3),
@@ -1013,6 +1048,7 @@ async def extract_knowledge_graph_streaming(
     char_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=char_tmpl.get("system_prompt", ""),
         prompt_builder=build_character_prompt,
         parser=parse_character_payload,
@@ -1043,8 +1079,11 @@ async def extract_knowledge_graph_streaming(
     event_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=event_tmpl.get("system_prompt", ""),
-        prompt_builder=lambda c: build_event_prompt(c["content"], character_list_json),
+        prompt_builder=lambda c, _p: build_event_prompt(
+            c["content"], character_list_json, _p
+        ),
         parser=parse_event_payload,
         label="event",
         temperature=float(event_tmpl.get("temperature") or 0.3),
@@ -1076,9 +1115,10 @@ async def extract_knowledge_graph_streaming(
     participation_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=participation_tmpl.get("system_prompt", ""),
-        prompt_builder=lambda c: build_participation_prompt(
-            c["content"], character_list_json, event_list_json
+        prompt_builder=lambda c, _p: build_participation_prompt(
+            c["content"], character_list_json, event_list_json, _p
         ),
         parser=parse_participation_payload,
         label="participation",
@@ -1107,8 +1147,11 @@ async def extract_knowledge_graph_streaming(
     char_rel_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=char_rel_tmpl.get("system_prompt", ""),
-        prompt_builder=lambda c: build_char_relation_prompt(c["content"], character_list_json),
+        prompt_builder=lambda c, _p: build_char_relation_prompt(
+            c["content"], character_list_json, _p
+        ),
         parser=parse_char_relation_payload,
         label="char_relation",
         temperature=float(char_rel_tmpl.get("temperature") or 0.3),
@@ -1136,8 +1179,11 @@ async def extract_knowledge_graph_streaming(
     event_rel_results = await _run_phase(
         model_cfg,
         chunks,
+        prompts=prompts,
         system_prompt=event_rel_tmpl.get("system_prompt", ""),
-        prompt_builder=lambda c: build_event_relation_prompt(c["content"], event_list_json),
+        prompt_builder=lambda c, _p: build_event_relation_prompt(
+            c["content"], event_list_json, _p
+        ),
         parser=parse_event_relation_payload,
         label="event_relation",
         temperature=float(event_rel_tmpl.get("temperature") or 0.3),
@@ -1301,60 +1347,119 @@ async def extract_knowledge_graph_v2(
     char_ids = {c["id"] for c in global_characters}
     event_ids = {e["id"] for e in global_events}
 
-    # ---- Phase 3: participations ---------------------------------------
-    part_output = await extractor.run_phase(
-        "participation", chunks,
-        character_list_json=character_list_json,
-        event_list_json=event_list_json,
+    # ---- P0: Phase 3-5 并发执行 -----------------------------------------
+    # Phase 3-5 互相独立, 都只依赖全局人物/事件 ID 列表, 并发跑.
+    on_progress({
+        "event": "phase_started", "phase": "relations_concurrent",
+        "message": "开始并发抽取 3 类关系", "percent": 55,
+    })
+    part_output, char_rel_output, evt_rel_output = await asyncio.gather(
+        extractor.run_phase(
+            "participation", chunks,
+            character_list_json=character_list_json,
+            event_list_json=event_list_json,
+        ),
+        extractor.run_phase(
+            "char_relation", chunks,
+            character_list_json=character_list_json,
+        ),
+        extractor.run_phase(
+            "event_relation", chunks,
+            event_list_json=event_list_json,
+        ),
     )
+
+    # ---- P0: 回填 evidence 的字符级 offset ------------------------------
+    # 在 LLM 抽出后, 用 chunk 原文做二次 find, 把 start/end 写回 span.
+    chunk_text_by_id = {str(c.get("id", "")): c.get("content", "") for c in chunks}
+    _resolve_evidence_offsets(part_output, chunk_text_by_id)
+    _resolve_evidence_offsets(char_rel_output, chunk_text_by_id)
+    _resolve_evidence_offsets(evt_rel_output, chunk_text_by_id)
+
     global_participations = merge_relations(
         part_output.dicts_by_chunk(),
         valid_sources=char_ids, valid_targets=event_ids,
     )
     on_progress({
         "event": "phase_done", "phase": "participations",
-        "count": len(global_participations), "percent": 60,
+        "count": len(global_participations), "percent": 65,
         "message": f"参与关系: {len(global_participations)}",
     })
     on_partial("participations", global_participations)
 
-    # ---- Phase 4: character relations ----------------------------------
-    char_rel_output = await extractor.run_phase(
-        "char_relation", chunks, character_list_json=character_list_json,
-    )
     global_char_rels = merge_relations(
         char_rel_output.dicts_by_chunk(),
         valid_sources=char_ids, valid_targets=char_ids,
     )
     on_progress({
         "event": "phase_done", "phase": "char_relations",
-        "count": len(global_char_rels), "percent": 75,
+        "count": len(global_char_rels), "percent": 78,
         "message": f"人物关系: {len(global_char_rels)}",
     })
     on_partial("char_relations", global_char_rels)
 
-    # ---- Phase 5: event relations --------------------------------------
-    evt_rel_output = await extractor.run_phase(
-        "event_relation", chunks, event_list_json=event_list_json,
-    )
     global_event_rels = merge_relations(
         evt_rel_output.dicts_by_chunk(),
         valid_sources=event_ids, valid_targets=event_ids,
     )
     on_progress({
         "event": "phase_done", "phase": "event_relations",
-        "count": len(global_event_rels), "percent": 88,
+        "count": len(global_event_rels), "percent": 90,
         "message": f"事件关系: {len(global_event_rels)}",
     })
     on_partial("event_relations", global_event_rels)
+
+    # ---- P1: 关系二次确认 (低 confidence 的边) ------------------------
+    if run_validator:
+        validator = MergeValidatorAgent()
+        entity_pool_json = json.dumps(
+            {
+                "characters": [{"id": c["id"], "name": c["name"]}
+                               for c in global_characters],
+                "events": [{"id": e["id"], "name": e["name"]}
+                           for e in global_events],
+            },
+            ensure_ascii=False,
+        )
+        evidence_by_chunk_rel: Dict[str, str] = {}
+        for it in (
+            part_output.items + char_rel_output.items + evt_rel_output.items
+        ):
+            q = it.primary_evidence()
+            if q and it.chunk_id not in evidence_by_chunk_rel:
+                evidence_by_chunk_rel[it.chunk_id] = q
+
+        for label, rels, pool in (
+            ("participation", global_participations, entity_pool_json),
+            ("char_relation", global_char_rels, entity_pool_json),
+            ("event_relation", global_event_rels, entity_pool_json),
+        ):
+            try:
+                kept, dropped = await validator.confirm_low_confidence_relations(
+                    rels, pool, evidence_by_chunk_rel, model_cfg,
+                )
+                if dropped:
+                    logger.info(
+                        "P1 relation confirm dropped %d edges in %s",
+                        len(dropped), label,
+                    )
+                if label == "participation":
+                    global_participations = kept
+                elif label == "char_relation":
+                    global_char_rels = kept
+                else:
+                    global_event_rels = kept
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("P1 relation confirm skipped for %s: %s", label, exc)
 
     # ---- Validator -----------------------------------------------------
     validation_block: Optional[Dict[str, Any]] = None
     if run_validator:
         evidence_by_id: Dict[str, str] = {}
         for it in char_output.items + event_output.items:
-            if it.evidence and it.chunk_id not in evidence_by_id:
-                evidence_by_id[it.chunk_id] = it.evidence
+            q = it.primary_evidence()
+            if q and it.chunk_id not in evidence_by_id:
+                evidence_by_id[it.chunk_id] = q
 
         validator = MergeValidatorAgent()
         validated = await validator.validate(
@@ -1366,6 +1471,7 @@ async def extract_knowledge_graph_v2(
             chunks=chunks,
             evidence_by_id=evidence_by_id,
             model_cfg=model_cfg,
+            prompts=prompts,
             run_llm_dedup=run_llm_dedup,
             run_llm_completeness=run_llm_completeness,
         )
@@ -1389,6 +1495,50 @@ async def extract_knowledge_graph_v2(
             "dedup_log": validated.dedup_log,
             "coverage": validated.coverage,
         }
+
+        # ---- P1: 闭环自反思: 拿 error issue 触发定点重抽 ---------------
+        error_issues = [i for i in validated.issues if i.severity == "error"]
+        if error_issues:
+            # 从 issue.payload 里捞出涉及的 chunk_id 集合
+            target_chunk_ids: List[str] = []
+            for issue in error_issues:
+                payload = issue.payload or {}
+                cids = payload.get("chunk_ids")
+                if isinstance(cids, list):
+                    target_chunk_ids.extend(str(c) for c in cids)
+            target_chunk_ids = list(dict.fromkeys(target_chunk_ids))
+            # 限幅, 避免重抽太多
+            if target_chunk_ids and len(target_chunk_ids) <= 20:
+                try:
+                    on_progress({
+                        "event": "feedback_started",
+                        "message": f"对 {len(target_chunk_ids)} 个片段反馈重抽",
+                        "percent": 96,
+                    })
+                    re_part = await validator.feedback_re_extract(
+                        extractor, chunks, target_chunk_ids, "participation",
+                        character_list_json=character_list_json,
+                        event_list_json=event_list_json,
+                    )
+                    if re_part.items:
+                        re_global = merge_relations(
+                            re_part.dicts_by_chunk(),
+                            valid_sources=char_ids, valid_targets=event_ids,
+                        )
+                        # 仅追加, 不冲掉首轮
+                        existing = {
+                            (r.get("source"), r.get("target"))
+                            for r in global_participations
+                        }
+                        for r in re_global:
+                            if (r.get("source"), r.get("target")) not in existing:
+                                global_participations.append(r)
+                    on_progress({
+                        "event": "feedback_done",
+                        "message": "反馈重抽完成", "percent": 98,
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("P1 feedback re-extract skipped: %s", exc)
 
     stored = await replace_knowledge_graph(
         novel_id,
@@ -1420,3 +1570,68 @@ async def extract_knowledge_graph_v2(
             "chunks_processed": len(chunks),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# KG management: 删除 + 重新提取
+# ---------------------------------------------------------------------------
+
+
+async def delete_knowledge_graph(novel_id: int) -> Dict[str, int]:
+    """清空指定小说的全部知识图谱(人物/事件/三类关系).
+
+    返回各类删除的行数, 便于前端展示"已删除 X 人物 Y 事件 ..."
+    """
+    from database import delete_knowledge_graph as _db_delete
+    return await _db_delete(novel_id)
+
+
+async def re_extract_knowledge_graph(
+    novel_id: int,
+    *,
+    model_config_id: Optional[int] = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    max_concurrency: int = MAX_CONCURRENCY,
+    run_validator: bool = True,
+    run_llm_dedup: bool = True,
+    run_llm_completeness: bool = False,
+) -> Dict[str, Any]:
+    """删除现有知识图谱后, 重新走一遍 v2 流水线.
+
+    语义上等价于: DELETE + POST /knowledge-graph/v2, 写在一个事务里更直观.
+    """
+    await delete_knowledge_graph(novel_id)
+    return await extract_knowledge_graph_v2(
+        novel_id,
+        model_config_id=model_config_id,
+        chunk_size=chunk_size,
+        max_concurrency=max_concurrency,
+        run_validator=run_validator,
+        run_llm_dedup=run_llm_dedup,
+        run_llm_completeness=run_llm_completeness,
+    )
+
+
+def _resolve_evidence_offsets(
+    phase_output: "PhaseOutput",
+    chunk_text_by_id: Dict[str, str],
+) -> None:
+    """回填 ExtractedItem.evidence[*].start/end, 兼容 chunk 文本被改写的场景.
+
+    仅当 span.strategy == "anchor" 时尝试重算 (因为 anchor 找得到位置);
+    其它 strategy 保留原值. 这一步在 _make_evidence 之后, 用最新的 chunk 文本
+    做 find, 进一步降低 LLM 截断 / 标点差异带来的定位失败.
+    """
+    from services.agents import _find_offsets, _sentence_index_of
+    for it in phase_output.items:
+        chunk_text = chunk_text_by_id.get(it.chunk_id, "")
+        if not chunk_text:
+            continue
+        for span in it.evidence:
+            if span.strategy != "anchor" or not span.quote:
+                continue
+            s, e = _find_offsets(chunk_text, span.quote)
+            if s is not None:
+                span.start = s
+                span.end = e
+                span.sentence_idx = _sentence_index_of(chunk_text, s)

@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+import aiosqlite
+
 from database import get_db
 
 logger = logging.getLogger(__name__)
@@ -72,17 +74,24 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 
 任务要求：
 1. 为每个人物赋予唯一ID（如 `char_001`，同一人物在不同片段尽量复用同一ID；无法确认则新建）。
-2. 提取以下内在属性（如果文中出现）：
+2. 仅关注**本片段**明确出现的人物；不要把无关人物也罗列进来。无法确认的宁可省略，也不要猜测。
+3. 提取以下内在属性（如果文中出现；未出现则省略该字段，不要编造）：
    - 别名/字号
    - 性别
-   - 身份/职位/地位简述（如「荣国府嫡孙」）
+   - 身份/职位/地位（如「荣国府嫡孙」）
    - 性格标签
    - 外貌特征
-   - 其他描述人物自身且不指向其他实体的信息
-3. 严禁将人物与其他人物、地点、组织的关系混入属性。例如「丫鬟是袭人」不能作为字段，因为袭人是另一个人物实体。
-4. 如果同一人物在不同段落出现，尽量合并，使用同一ID；无法确认的宁可新建，后续再合并。
+   - 籍贯
+   - 家族 / 所属组织
+   - 阵营 / 立场
+   - 婚姻状况
+   - 首次出场位置（如「第3回」或「第三章」）
+   - 能力/特长（列表）
+   - 代表台词（一句话，最有代表性的对白或口头禅）
+4. 严禁将人物与其他人物、地点、组织的关系混入属性。例如「丫鬟是袭人」不能作为字段，因为袭人是另一个人物实体。
+5. 如果同一人物在不同段落出现，尽量合并，使用同一ID。
 
-输出格式：严格输出 JSON 数组，每个元素为一个人物对象：
+参考示例（仅作格式参考，不代表必须输出这些字段）：
 [
   {{
     "id": "char_001",
@@ -92,10 +101,18 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
       "性别": "男",
       "身份": "贾府嫡孙",
       "性格": ["叛逆", "多情"],
-      "外貌": "面如中秋之月，色如春晓之花"
+      "外貌": "面如中秋之月",
+      "籍贯": "金陵",
+      "家族": "贾府",
+      "阵营": "贾府",
+      "婚姻状况": "未婚",
+      "首次出场位置": "第三回",
+      "能力/特长": ["诗才", "机敏"],
+      "代表台词": "女儿是水做的骨肉"
     }}
   }}
 ]
+
 如果没有提取到任何人物，返回空数组 []。""",
         "temperature": 0.3,
         "max_tokens": 2400,
@@ -120,17 +137,23 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 
 任务要求：
 1. 为每个事件赋予唯一ID（如 `evt_001`）。
-2. 提取以下内在属性（如果文中明确）：
-   - 时间（精确或相对时间，如「芒种节」）
+2. 仅关注**本片段**明确出现的事件；不要编造未发生的事件。
+3. 提取以下内在属性（如果文中明确；未出现则省略该字段）：
+   - 时间（精确或相对时间，如「芒种节」「三月初三」）
    - 地点（如「大观园沁芳闸桥边」）
    - 章回
    - 摘要（一两句话概括事件过程）
    - 起因
    - 结果
-3. 事件参与人物不放在属性里，后续由关系边处理。
-4. 事件划分以「情节转折点或人物交互的完整片段」为最小单元，避免过于细碎（单独一个动作不必独立成事件）。
+   - 重要性（"高" / "中" / "低"，依据对主线/人物的影响）
+   - 情绪基调（如「悲伤压抑」「激烈冲突」）
+   - 关键物品（列表，如「通灵宝玉」「花锄」）
+   - 冲突类型（如「内心冲突」「外部冲突」「误会」）
+   - 结果影响（对人物关系或主线的推进）
+4. 事件参与人物不放在属性里，后续由关系边处理。
+5. 事件粒度：以「情节转折点或人物交互的完整片段」为最小单元。单独一个动作（如「宝玉喝了口茶」）不必独立成事件；至少需包含「意图 + 行为 + 反映/结果」之一。
 
-输出格式：严格输出 JSON 数组，每个元素为一个事件对象：
+参考示例（仅作格式参考，不代表必须输出这些字段）：
 [
   {{
     "id": "evt_001",
@@ -141,7 +164,12 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
       "章回": "第27回",
       "摘要": "黛玉在花冢前哭泣，吟诵葬花词，宝玉听后感慨。",
       "起因": "黛玉误会宝玉不见她",
-      "结果": "二人感情更深"
+      "结果": "二人感情更深",
+      "重要性": "高",
+      "情绪基调": "悲伤",
+      "关键物品": ["花锄", "花冢"],
+      "冲突类型": "内心冲突",
+      "结果影响": "深化宝黛情感线"
     }}
   }}
 ]
@@ -172,11 +200,17 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 {event_list_json}
 
 任务要求：
-1. 识别文本中明确描述的人物参与某个事件的关系。
+1. 仅识别本片段中**明确出现**的人物与事件之间的参与关系，不要推断未明示的关系。
 2. 关系固定为 `PARTICIPATES_IN`。
-3. 在关系上可附 `角色`（如「发起者」「受害者」「见证者」）和 `具体行为`。
+3. 在关系的 `properties` 字段中可附加以下键（未出现则省略该键，不要编造）：
+   - 角色（如「发起者」「受害者」「见证者」「协助者」）
+   - 具体行为（一句话概括该人物在此事件中的动作）
+   - 时间（参与时间点或时间范围）
+   - 地点（参与地点）
+   - 情绪（当时情绪，如「愤怒」「悲伤」「喜悦」）
+   - 动机（参与动机，如「为朋友复仇」「被迫」）
 4. 多人参与同一事件，每个参与关系单独输出一条。
-5. 不得将事件的时间、地点等内在属性作为关系属性。
+5. 不得将事件的时间、地点等内在属性（属于事件自身）作为关系属性（除非该时间/地点特指该人物的参与）。
 
 输出格式：严格输出 JSON 数组，每条关系一个对象：
 [
@@ -186,7 +220,9 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
     "target": "evt_001",
     "properties": {{
       "角色": "发起者",
-      "具体行为": "吟诵葬花词"
+      "具体行为": "吟诵葬花词",
+      "情绪": "悲伤",
+      "动机": "自伤自怜"
     }}
   }}
 ]
@@ -213,18 +249,39 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 {character_list_json}
 
 任务要求：
-1. 识别人物之间的长期关系，例如：
+1. 仅基于本片段明确陈述的人物关系抽取，不要凭人物背景常识补充。
+2. 识别人物之间的长期关系，例如：
    - 亲属：父亲、母亲、哥哥、表妹等
    - 社交：朋友、同僚、恩人
    - 情感：恋人、倾慕、厌恶
    - 社会关系：主子与仆从、师生等
-2. 关系标签使用简洁的动词或名词（如 `父亲`、`丫鬟`、`倾慕`）。
-3. 一条关系只涉及两个人物，方向从主动到被动或从长辈到晚辈，需保持一致。
+3. 关系标签使用简洁的动词或名词（如 `父亲`、`丫鬟`、`倾慕`）。
+4. 一条关系只涉及两个人物，方向从主动到被动或从长辈到晚辈，需保持一致。
+5. 可在 `properties` 中附加以下键（未出现则省略）：
+   - 亲疏程度（如「亲密」「疏远」「敌对」）
+   - 关系确立时间（如「第3回」）
+   - 关系状态（如「稳定」「破裂中」「暗恋中」）
 
 输出格式：严格输出 JSON 数组，每条关系一个对象：
 [
-  {{ "source": "char_003", "relation": "父亲", "target": "char_001" }},
-  {{ "source": "char_005", "relation": "表妹", "target": "char_001" }}
+  {{
+    "source": "char_003",
+    "relation": "父亲",
+    "target": "char_001",
+    "properties": {{
+      "亲疏程度": "亲密",
+      "关系状态": "稳定"
+    }}
+  }},
+  {{
+    "source": "char_005",
+    "relation": "表妹",
+    "target": "char_001",
+    "properties": {{
+      "亲疏程度": "亲密",
+      "关系状态": "暗恋中"
+    }}
+  }}
 ]
 无关系则输出 []。""",
         "temperature": 0.3,
@@ -249,13 +306,26 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 {event_list_json}
 
 任务要求：
-1. 若一个事件是另一个事件的子事件（如「抄检大观园」包含「司棋被逐」），使用关系 `包含`。
-2. 若一个事件直接导致另一个事件，使用关系 `导致`。
-3. 方向严格遵循：大事件指向小事件为 `包含`，因事件指向果事件为 `导致`。
+1. 仅基于本片段明确陈述的关联抽取，不要跨片段推测。
+2. 若一个事件是另一个事件的子事件（如「抄检大观园」包含「司棋被逐」），使用关系 `包含`。
+3. 若一个事件直接导致另一个事件，使用关系 `导致`。
+4. 方向严格遵循：大事件指向小事件为 `包含`，因事件指向果事件为 `导致`。
+5. 可在 `properties` 中附加以下键（未出现则省略）：
+   - 因果强度（"强" / "中" / "弱"，依据情节关联紧密度）
+   - 时间距离（如「同一场景」「间隔数月」）
+   - 备注（必要时给出一句说明）
 
 输出格式：严格输出 JSON 数组，每条关系一个对象：
 [
-  {{ "source": "evt_010", "relation": "包含", "target": "evt_011" }}
+  {{
+    "source": "evt_010",
+    "relation": "包含",
+    "target": "evt_011",
+    "properties": {{
+      "因果强度": "强",
+      "时间距离": "同一场景"
+    }}
+  }}
 ]
 无则 []。""",
         "temperature": 0.3,
@@ -359,36 +429,110 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 # CRUD helpers
 # ---------------------------------------------------------------------------
 
+# Markers in the bundled user_prompt_template that did NOT exist in
+# earlier schema versions. If any of these markers is missing from the
+# stored template, the row is considered stale and will be refreshed to
+# the bundled default on next startup.
+_PROMPT_VERSION_MARKERS: Dict[str, str] = {
+    "kg.character": "籍贯",
+    "kg.event": "重要性",
+    "kg.participation": "动机",
+    "kg.char_relation": "亲疏程度",
+    "kg.event_relation": "因果强度",
+}
+
+
+async def _reset_stale_builtin_prompts(db: aiosqlite.Connection) -> int:
+    """Refresh built-in templates whose user_prompt_template lacks a
+    version marker. Returns the number of rows updated.
+    """
+    updated = 0
+    for default in DEFAULT_PROMPTS:
+        marker = _PROMPT_VERSION_MARKERS.get(default["key"])
+        if not marker:
+            continue
+        cur = await db.execute(
+            """
+            SELECT id, user_prompt_template FROM prompt_templates
+            WHERE key = ? AND is_builtin = 1
+            """,
+            (default["key"],),
+        )
+        row = await cur.fetchone()
+        if not row:
+            continue
+        stored_template = row[1] or ""
+        if marker in stored_template:
+            continue
+        await db.execute(
+            """
+            UPDATE prompt_templates SET
+                name = ?,
+                description = ?,
+                system_prompt = ?,
+                user_prompt_template = ?,
+                temperature = ?,
+                max_tokens = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                default["name"],
+                default.get("description") or "",
+                default.get("system_prompt", ""),
+                default.get("user_prompt_template", ""),
+                float(default.get("temperature", 0.3)),
+                int(default.get("max_tokens", 2400)),
+                row[0],
+            ),
+        )
+        updated += 1
+        logger.info(
+            "Refreshed stale built-in prompt %s (missing marker %r)",
+            default["key"],
+            marker,
+        )
+    return updated
+
+
 async def seed_default_prompts() -> None:
-    """Insert default templates if the table is empty (first run)."""
+    """Insert default templates if the table is empty (first run).
+
+    Also refreshes any built-in template whose bundled content has been
+    updated in code (detected via per-key version markers). Customised
+    user prompts are left untouched.
+    """
     async with get_db() as db:
         cur = await db.execute("SELECT COUNT(*) AS c FROM prompt_templates")
         row = await cur.fetchone()
         existing = row[0] if row else 0
-        if existing > 0:
-            return
-        for tmpl in DEFAULT_PROMPTS:
-            await db.execute(
-                """
-                INSERT INTO prompt_templates
-                    (key, name, category, description, system_prompt,
-                     user_prompt_template, temperature, max_tokens,
-                     is_builtin, is_enabled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
-                """,
-                (
-                    tmpl["key"],
-                    tmpl["name"],
-                    tmpl["category"],
-                    tmpl.get("description") or "",
-                    tmpl.get("system_prompt", ""),
-                    tmpl.get("user_prompt_template", ""),
-                    float(tmpl.get("temperature", 0.3)),
-                    int(tmpl.get("max_tokens", 2400)),
-                ),
-            )
-        await db.commit()
-        logger.info("Seeded %d default prompt templates", len(DEFAULT_PROMPTS))
+        if existing == 0:
+            for tmpl in DEFAULT_PROMPTS:
+                await db.execute(
+                    """
+                    INSERT INTO prompt_templates
+                        (key, name, category, description, system_prompt,
+                         user_prompt_template, temperature, max_tokens,
+                         is_builtin, is_enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+                    """,
+                    (
+                        tmpl["key"],
+                        tmpl["name"],
+                        tmpl["category"],
+                        tmpl.get("description") or "",
+                        tmpl.get("system_prompt", ""),
+                        tmpl.get("user_prompt_template", ""),
+                        float(tmpl.get("temperature", 0.3)),
+                        int(tmpl.get("max_tokens", 2400)),
+                    ),
+                )
+            await db.commit()
+            logger.info("Seeded %d default prompt templates", len(DEFAULT_PROMPTS))
+        else:
+            refreshed = await _reset_stale_builtin_prompts(db)
+            if refreshed:
+                await db.commit()
 
 
 def _row_to_dict(row) -> Dict[str, Any]:

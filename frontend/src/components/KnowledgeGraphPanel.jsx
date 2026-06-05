@@ -4,6 +4,8 @@ import { useToast } from './Toast/ToastProvider.jsx';
 import { KnowledgeGraphVisualizer } from './KnowledgeGraphVisualizer.jsx';
 import { EntityDetailModal } from './EntityDetailModal.jsx';
 import { ExtractionProgress } from './ExtractionProgress.jsx';
+import { EvidenceReader } from './EvidenceReader.jsx';
+import { ConfirmDialog } from './Modal/ConfirmDialog.jsx';
 
 function ModelSelect({ models, value, onChange, disabled }) {
   const enabledModels = models.filter((m) => m.enabled);
@@ -335,6 +337,12 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
   // Entity detail modal
   const [detailSelection, setDetailSelection] = useState(null);
 
+  // 原文引用阅读器 + 二次确认
+  const [readerState, setReaderState] = useState(null); // { evidenceList, jumpTo, anchor }
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmReExtract, setConfirmReExtract] = useState(false);
+  const [managing, setManaging] = useState(false); // 重新提取/删除进行中
+
   const enabledModels = models.filter((m) => m.enabled);
 
   useEffect(() => {
@@ -497,6 +505,169 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
     abortRef.current?.abort();
   };
 
+  // ---- KG 管理: 删除 / 重新提取 ---------------------------------------
+
+  const handleDelete = async () => {
+    setConfirmDelete(false);
+    if (!isEmpty) {
+      // 有数据才走删除, 空 KG 直接清理本地 state
+    }
+    setManaging(true);
+    try {
+      const result = await api.novels.deleteKnowledgeGraph(novelId);
+      const d = result?.deleted || {};
+      setData({
+        characters: [],
+        events: [],
+        character_event_relations: [],
+        character_relations: [],
+        event_relations: [],
+      });
+      setValidation(null);
+      setLiveData(null);
+      setDetailSelection(null);
+      setExtractStatus('idle');
+      setProgress(null);
+      setLastModel(null);
+      setUpdatedAt(null);
+      toast.success(
+        `已删除: ${d.characters || 0} 人物 / ${d.events || 0} 事件 / ${
+          (d.participations || 0) +
+          (d.character_relations || 0) +
+          (d.event_relations || 0)
+        } 关系`
+      );
+      onExtracted?.();
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : '删除知识图谱失败';
+      toast.error(message);
+    } finally {
+      setManaging(false);
+    }
+  };
+
+  const handleReExtract = async () => {
+    setConfirmReExtract(false);
+    if (enabledModels.length === 0) {
+      toast.error('请先在「系统设置」中启用模型');
+      return;
+    }
+    setManaging(true);
+    setExtractStatus('running');
+    setProgress({ percent: 0, message: '准备重新抽取…' });
+    setPhaseStats({});
+    setExtractError(null);
+    setValidation(null);
+    setLiveData({
+      characters: [],
+      events: [],
+      character_event_relations: [],
+      character_relations: [],
+      event_relations: [],
+    });
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const requestPayload = {
+        model_config_id: modelConfigId ? Number(modelConfigId) : null,
+        chunk_size: Number(chunkSize),
+        max_concurrency: Number(maxConcurrency),
+        run_validator: useV2,
+        run_llm_dedup: useV2,
+        run_llm_completeness: useV2 ? runCompleteness : false,
+      };
+      // re-extract 走的是 /re-extract 端点, 但前端用 v2 流式展现进度
+      // 先以 v2 流式订阅 partial + validation + done, 失败时回退到 POST 一次性调用
+      try {
+        await api.novels.extractCharactersStreamV2(
+          novelId,
+          requestPayload,
+          {
+            signal: controller.signal,
+            onEvent: ({ event, data }) => {
+              if (event === 'progress') setProgress(data);
+              else if (event === 'partial') {
+                const key = Object.keys(data || {})[0];
+                if (!key) return;
+                const items = data[key] || [];
+                setLiveData((prev) => {
+                  const next = { ...(prev || {}) };
+                  if (key === 'characters') next.characters = items;
+                  else if (key === 'events') next.events = items;
+                  else if (key === 'participations') next.character_event_relations = items;
+                  else if (key === 'char_relations') next.character_relations = items;
+                  else if (key === 'event_relations') next.event_relations = items;
+                  return next;
+                });
+              } else if (event === 'done') {
+                const result = data || {};
+                if (result.validation) setValidation(result.validation);
+                setData({
+                  characters: result.characters || [],
+                  events: result.events || [],
+                  character_event_relations: result.character_event_relations || [],
+                  character_relations: result.character_relations || [],
+                  event_relations: result.event_relations || [],
+                });
+                setLastModel(result.model || null);
+                setUpdatedAt(new Date().toLocaleTimeString());
+                setProgress({ percent: 100, message: '重新抽取完成' });
+                setExtractStatus('done');
+                setLiveData(null);
+                toast.success('重新抽取完成');
+                onExtracted?.();
+              } else if (event === 'error') {
+                setExtractError(typeof data === 'string' ? data : '重新抽取失败');
+                setExtractStatus('error');
+                toast.error(typeof data === 'string' ? data : '重新抽取失败');
+              }
+            },
+          }
+        );
+      } catch (streamErr) {
+        // 流式不可用时 (例如旧版后端未实现 v2 stream), 回退到 POST 一次性调用
+        const result = await api.novels.reExtractKnowledgeGraph(
+          novelId,
+          requestPayload,
+          { signal: controller.signal }
+        );
+        if (result.validation) setValidation(result.validation);
+        setData({
+          characters: result.characters || [],
+          events: result.events || [],
+          character_event_relations: result.character_event_relations || [],
+          character_relations: result.character_relations || [],
+          event_relations: result.event_relations || [],
+        });
+        setLastModel(result.model || null);
+        setUpdatedAt(new Date().toLocaleTimeString());
+        setExtractStatus('done');
+        setProgress({ percent: 100, message: '重新抽取完成' });
+        setLiveData(null);
+        toast.success('重新抽取完成');
+        onExtracted?.();
+      }
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        setExtractStatus('idle');
+        setProgress(null);
+        toast.info('已取消');
+        return;
+      }
+      const message = err instanceof ApiError ? err.message : '重新抽取失败';
+      setExtractError(message);
+      setExtractStatus('error');
+      toast.error(message);
+    } finally {
+      setManaging(false);
+      setExtracting(false);
+      abortRef.current = null;
+    }
+  };
+
   // During streaming we render `liveData` (so the user sees entities
   // appear as they're extracted). After completion we render `data`.
   const renderData = useMemo(() => {
@@ -654,6 +825,52 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
             </>
           )}
         </button>
+
+        {/* KG 管理: 重新提取 / 删除 */}
+        <div className="kg-manage-group">
+          <button
+            type="button"
+            className="kg-manage-btn"
+            onClick={() => setConfirmReExtract(true)}
+            disabled={
+              extracting || managing || enabledModels.length === 0 || isEmpty
+            }
+            title={isEmpty ? '当前没有可重新提取的知识图谱' : '删除当前图谱后重新抽取'}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" strokeWidth="2">
+              <path
+                d="M23 4v6h-6M1 20v-6h6"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            重新提取
+          </button>
+          <button
+            type="button"
+            className="kg-manage-btn is-danger"
+            onClick={() => setConfirmDelete(true)}
+            disabled={extracting || managing || isEmpty}
+            title="清空当前图谱（不重新抽取）"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" strokeWidth="2">
+              <path
+                d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6M10 11v6M14 11v6"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            删除图谱
+          </button>
+        </div>
       </div>
 
       <div className="character-summary kg-summary">
@@ -863,6 +1080,41 @@ export function KnowledgeGraphPanel({ novelId, models, novelTitle, onExtracted }
         data={data}
         selection={detailSelection}
         onSelectNode={(sel) => setDetailSelection(sel)}
+        onJumpEvidence={(state) => setReaderState(state)}
+      />
+
+      <EvidenceReader
+        open={!!readerState}
+        onClose={() => setReaderState(null)}
+        novelId={novelId}
+        novelTitle={novelTitle}
+        evidenceList={readerState?.evidenceList}
+        jumpTo={readerState?.jumpTo}
+        onJumpConsumed={() => {
+          /* 触发后清掉 jumpTo, 避免 activeIdx 重复设置 */
+        }}
+        chunkSize={Math.max(Number(chunkSize) || 8000, 8000)}
+      />
+
+      <ConfirmDialog
+        open={confirmReExtract}
+        title="重新提取知识图谱"
+        message="将清空当前图谱, 然后重新走一遍抽取流程. 旧的人物/事件/关系将全部丢失 (不可恢复), 请确认无误后继续."
+        confirmText="开始重新提取"
+        danger={false}
+        onConfirm={handleReExtract}
+        onCancel={() => setConfirmReExtract(false)}
+      />
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title="删除知识图谱"
+        message="将清空当前作品的人物、事件与全部关系. 该操作不可撤销, 如需重建请使用「重新提取」."
+        confirmText="确认删除"
+        cancelText="取消"
+        danger={true}
+        onConfirm={handleDelete}
+        onCancel={() => setConfirmDelete(false)}
       />
     </div>
   );

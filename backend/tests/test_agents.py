@@ -35,20 +35,54 @@ from services.agents import (
 def test_make_evidence_uses_name_anchor():
     chunk = "第一段内容: 灵儿在船上, 我和灵儿手拉手走向甲板。"
     obj = {"id": "char_x", "name": "灵儿"}
-    ev = ExtractorAgent._make_evidence(obj, chunk)
-    assert "灵儿" in ev
-    assert len(ev) <= 80 + 20
+    spans = ExtractorAgent._make_evidence(obj, chunk, chunk_id="c1")
+    assert len(spans) == 1
+    assert "灵儿" in spans[0].quote
+    # span.quote 必须是 chunk 的子串, 且 start/end 精确映射
+    assert chunk[spans[0].start : spans[0].end] == spans[0].quote
+    assert spans[0].start is not None and spans[0].end is not None
+    # 锚点 "灵儿" 应在 quote 范围内 (偏移不超过前 20 字符的前缀)
+    assert chunk.find("灵儿") >= spans[0].start
+    assert chunk.find("灵儿") < spans[0].end
+    assert spans[0].strategy == "anchor"
+    assert spans[0].chunk_id == "c1"
 
 
 def test_make_evidence_falls_back_to_attribute_value():
     chunk = "这段话没有任何名字, 但提到了他在澳洲阵亡。"
     obj = {"id": "char_x", "name": "", "attributes": {"结局": "在澳洲阵亡"}}
-    ev = ExtractorAgent._make_evidence(obj, chunk)
-    assert "澳洲" in ev or ev == chunk[:80]
+    spans = ExtractorAgent._make_evidence(obj, chunk)
+    # "在澳洲阵亡" 实际就在 chunk 内, 锚点能找到 -> strategy=anchor
+    assert spans
+    assert spans[0].strategy == "anchor"
+    assert "澳洲" in spans[0].quote
+
+
+def test_make_evidence_head_fallback_when_anchor_absent():
+    chunk = "一段与抽取对象毫无关联的描述性文字。"
+    obj = {"id": "char_x", "name": "完全不存在的名字XXX"}
+    spans = ExtractorAgent._make_evidence(obj, chunk)
+    # 锚点找不到 -> 段首兜底
+    assert spans
+    assert spans[0].strategy == "head"
+    assert spans[0].start == 0
 
 
 def test_make_evidence_handles_empty_chunk():
-    assert ExtractorAgent._make_evidence({"name": "x"}, "") == ""
+    assert ExtractorAgent._make_evidence({"name": "x"}, "") == []
+
+
+def test_make_evidence_relation_uses_action_as_anchor():
+    """关系类的 evidence 锚点: source 是 ID 找不到, 退而求 action/role/relation."""
+    chunk = "林远与叶知秋在山顶结拜。林远把手伸向叶知秋。"
+    obj = {"source": "char_001", "target": "char_002", "relation": "结拜"}
+    spans = ExtractorAgent._make_evidence(obj, chunk)
+    assert spans
+    # "结拜" 在 chunk 内, 应作为锚点
+    assert spans[0].strategy == "anchor"
+    assert chunk[spans[0].start : spans[0].end] == spans[0].quote
+    assert chunk.find("结拜") >= spans[0].start
+    assert chunk.find("结拜") < spans[0].end
 
 
 def test_read_confidence_priority():
@@ -80,12 +114,42 @@ def test_build_phase_prompt_uses_content_string_not_dict_repr():
     silently substitute its repr into the prompt. The dispatcher must
     extract ``content`` as a string."""
     chunk = {"id": "c1", "title": "T", "content": "这是真实内容"}
-    p = build_phase_prompt("character", chunk)
+    prompts = {
+        "character": {
+            "user_prompt_template": "请处理以下文本: {chunk_text}",
+        }
+    }
+    p = build_phase_prompt("character", chunk, prompts)
     # The user_prompt_template uses {chunk_text} — only the content should
     # land in the template, not the dict's repr with keys "id", "title".
     assert "这是真实内容" in p
     assert "'id':" not in p
     assert "'title':" not in p
+
+
+def test_build_phase_prompt_uses_db_user_template():
+    """DB-stored user_prompt_template must be the one rendered, not the
+    bundled default. This is the fix for the bug where the previous
+    ``_resolve_prompt`` always returned the in-memory default.
+    """
+    from services.prompt_service import get_default_prompt
+
+    chunk = {"content": "片段内容"}
+    default = get_default_prompt("kg.character") or {}
+    default_tmpl = default.get("user_prompt_template", "")
+
+    custom = {
+        "character": {
+            "user_prompt_template": "CUSTOM_USER_PROMPT_MARKER {chunk_text}",
+            "system_prompt": default.get("system_prompt", ""),
+            "temperature": 0.3,
+            "max_tokens": 2400,
+        }
+    }
+    p = build_phase_prompt("character", chunk, custom)
+    assert "CUSTOM_USER_PROMPT_MARKER" in p
+    # The default template is much longer and would not contain the marker.
+    assert "CUSTOM_USER_PROMPT_MARKER" not in default_tmpl
 
 
 # ---------------------------------------------------------------------------
@@ -254,3 +318,107 @@ async def test_validate_runs_hard_rules_and_skips_llm():
     assert "evt_002" in validated.coverage["events_without_participant"]
     # 5) dedup_log empty (LLM dedup disabled)
     assert validated.dedup_log == []
+
+
+# ---------------------------------------------------------------------------
+# P0: EvidenceSpan + offset
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_span_roundtrip_to_dict():
+    from services.agents import EvidenceSpan
+    s = EvidenceSpan(
+        chunk_id="c1", quote="灵儿在船上", start=5, end=10,
+        strategy="anchor", sentence_idx=2,
+    )
+    d = s.to_dict()
+    assert d["chunk_id"] == "c1"
+    assert d["start"] == 5
+    assert d["end"] == 10
+    assert d["strategy"] == "anchor"
+    assert d["sentence_idx"] == 2
+
+
+def test_find_offsets_tolerates_truncated_punctuation():
+    from services.agents import _find_offsets
+    chunk = "第一段。灵儿在船上, 我和灵儿手拉手走向甲板。"
+    # LLM 截断末尾标点
+    quote = "灵儿在船上"
+    s, e = _find_offsets(chunk, quote)
+    assert s is not None
+    assert chunk[s:e] == quote
+
+
+def test_find_offsets_returns_none_when_not_found():
+    from services.agents import _find_offsets
+    s, e = _find_offsets("短文本", "完全找不到的片段")
+    assert s is None and e is None
+
+
+# ---------------------------------------------------------------------------
+# P1: 关系二次确认 (low confidence)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_confirm_low_confidence_relations_drops_invalid(monkeypatch):
+    """LLM 判否的边进 dropped, 判是的进 kept 且 confidence 提升."""
+    from services import agents
+
+    async def fake_chat(**kwargs):
+        # 检查 user_prompt 含边信息
+        assert "char_a" in kwargs["user_prompt"]
+        return '{"is_valid": false, "reason": "边不存在"}'
+
+    monkeypatch.setattr(agents.ai_service, "chat_completion", fake_chat)
+    agent = MergeValidatorAgent()
+    rels = [
+        {"source": "char_a", "target": "char_b",
+         "relation": "结拜", "confidence": 0.4},
+        {"source": "char_c", "target": "char_d",
+         "relation": "父子", "confidence": 0.95},  # 高 confidence 跳过
+    ]
+    kept, dropped = await agent.confirm_low_confidence_relations(
+        rels, "{}", {"c1": "ctx"},
+        model_cfg={"provider": "x", "model_url": "u", "api_key": "k",
+                   "model_name": "m"},
+        # 显式传模板, 避免缺省模板查找
+        tmpl={"user_prompt_template": "judge {relation_json} {evidence}",
+              "system_prompt": "", "temperature": 0.1, "max_tokens": 400},
+        threshold=0.7,
+    )
+    assert len(kept) == 1
+    assert kept[0]["source"] == "char_c"
+    assert len(dropped) == 1
+    assert dropped[0]["source"] == "char_a"
+    assert dropped[0].get("rejected") is True
+
+
+# ---------------------------------------------------------------------------
+# P0: KG 管理
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_knowledge_graph_clears_all_tables(tmp_path, monkeypatch):
+    """delete_knowledge_graph 走 database.delete, 验证表都被清."""
+    from services import kg_service
+
+    # 用一个 in-memory fake db layer
+    deleted_tables: list = []
+
+    async def fake_delete(novel_id: int):
+        return {
+            "characters": 3,
+            "events": 2,
+            "character_event_relations": 5,
+            "character_relations": 1,
+            "event_relations": 0,
+        }
+
+    monkeypatch.setattr(
+        "database.delete_knowledge_graph", fake_delete, raising=False
+    )
+    counts = await kg_service.delete_knowledge_graph(99)
+    assert counts["characters"] == 3
+    assert counts["character_event_relations"] == 5

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { EvidenceSection } from './EvidenceSection.jsx';
 
 /**
  * Modal that displays detailed information for a character, event or
@@ -62,6 +63,24 @@ function RelationsTable({ title, items, kind, entityMap, onJump }) {
           const sourceName = entityMap[r.source] || r.source;
           const targetName = entityMap[r.target] || r.target;
           const isSource = r.source === entityMap._focusId;
+          // Combine the legacy role/action shortcuts with the full
+          // properties blob so user-added fields (时间, 地点, 情绪,
+          // 动机, 亲疏程度, 关系状态, ...) show up here.
+          const extraParts = [r.role, r.action].filter(Boolean);
+          const extraProperties = r.properties
+            ? Object.entries(r.properties)
+                .filter(
+                  ([k, v]) =>
+                    v !== null && v !== undefined && v !== '' &&
+                    !(Array.isArray(v) && v.length === 0) &&
+                    k !== '角色' && k !== '具体行为' &&
+                    k !== 'role' && k !== 'action'
+                )
+                .map(([k, v]) =>
+                  `${k}: ${Array.isArray(v) ? v.join('、') : String(v)}`
+                )
+            : [];
+          const extra = [...extraParts, ...extraProperties].join(' · ');
           return (
             <li
               key={`${kind}-${i}`}
@@ -84,11 +103,7 @@ function RelationsTable({ title, items, kind, entityMap, onJump }) {
               >
                 {targetName}
               </button>
-              {(r.role || r.action) && (
-                <span className="kg-detail-rel-extra">
-                  {[r.role, r.action].filter(Boolean).join(' · ')}
-                </span>
-              )}
+              {extra && <span className="kg-detail-rel-extra">{extra}</span>}
             </li>
           );
         })}
@@ -104,6 +119,8 @@ export function EntityDetailModal({
   // One of: { type: 'character' | 'event', entity: {...} } OR { type: 'relation', relation: {...} }
   selection,
   onSelectNode,
+  // 点击 evidence 卡片时触发, 由父组件打开 EvidenceReader
+  onJumpEvidence,
 }) {
   // Hooks must be called unconditionally on every render — keep them
   // above any early return to satisfy the rules of hooks.
@@ -188,6 +205,15 @@ export function EntityDetailModal({
           <AttributeList attributes={ent.attributes} />
         </section>
 
+        <EvidenceSection
+          extras={ent.extras}
+          onJump={(ev) => onJumpEvidence?.({
+            evidenceList: ent.extras?.evidence || [ev],
+            jumpTo: ev,
+            anchor: { type: isCharacter ? 'character' : 'event', entity: ent },
+          })}
+        />
+
         {isCharacter && (
           <RelationsTable
             title="参与事件"
@@ -245,6 +271,20 @@ export function EntityDetailModal({
     const r = selection.relation || {};
     const sourceName = entityMap[r.source] || r.source;
     const targetName = entityMap[r.target] || r.target;
+    // ``r.role``/``r.action`` are derived from ``r.properties`` for
+    // participations; strip those keys so we don't render the same
+    // value twice in 参与信息 and 附加属性.
+    const allProperties = r.properties || {};
+    const legacyShortcuts = new Set(
+      ['角色', '具体行为', 'role', 'action'].filter(
+        (k) => r[k] !== undefined && r[k] !== null && r[k] !== ''
+      )
+    );
+    const extraProperties = Object.fromEntries(
+      Object.entries(allProperties).filter(([k]) => !legacyShortcuts.has(k))
+    );
+    const hasShortcut = r.role || r.action;
+    const hasExtraProperties = Object.keys(extraProperties).length > 0;
     body = (
       <div className="kg-detail-body">
         <header className="kg-detail-head is-relation">
@@ -289,7 +329,7 @@ export function EntityDetailModal({
             </button>
           </div>
         </section>
-        {(r.role || r.action) && (
+        {hasShortcut && (
           <section className="kg-detail-section">
             <h4 className="kg-detail-section-title">参与信息</h4>
             <dl className="kg-detail-attrs">
@@ -308,12 +348,21 @@ export function EntityDetailModal({
             </dl>
           </section>
         )}
-        {r.properties && Object.keys(r.properties).length > 0 && (
+        {hasExtraProperties && (
           <section className="kg-detail-section">
             <h4 className="kg-detail-section-title">附加属性</h4>
-            <AttributeList attributes={r.properties} />
+            <AttributeList attributes={extraProperties} />
           </section>
         )}
+
+        <EvidenceSection
+          extras={r.extras}
+          onJump={(ev) => onJumpEvidence?.({
+            evidenceList: r.extras?.evidence || [ev],
+            jumpTo: ev,
+            anchor: { type: 'relation', relation: r },
+          })}
+        />
       </div>
     );
   }

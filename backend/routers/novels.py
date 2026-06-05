@@ -29,6 +29,7 @@ from schemas import (
 )
 from services import (
     ParseError,
+    delete_knowledge_graph,
     delete_novel,
     extract_knowledge_graph,
     extract_knowledge_graph_streaming,
@@ -41,6 +42,7 @@ from services import (
     parse_chapters_by_rule,
     parse_chapters_fixed_size,
     preview_chapters_by_rule,
+    re_extract_knowledge_graph,
     update_novel_info,
     upload_novel,
 )
@@ -191,6 +193,91 @@ async def get_knowledge_graph_endpoint(novel_id: int):
     if not await get_novel_detail(novel_id):
         raise HTTPException(status_code=404, detail="小说不存在")
     return await list_knowledge_graph(novel_id)
+
+
+@router.delete("/{novel_id}/knowledge-graph")
+async def delete_knowledge_graph_endpoint(novel_id: int):
+    """清空指定小说的全部知识图谱(人物/事件/3 类关系).
+
+    与"重新提取"不同, 这是纯删除操作, 不会触发 LLM 抽取.
+    用于: 抽取结果有严重错误, 想从零重抽, 或测试场景.
+    """
+    if not await get_novel_detail(novel_id):
+        raise HTTPException(status_code=404, detail="小说不存在")
+    try:
+        counts = await delete_knowledge_graph(novel_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("delete knowledge graph failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="删除知识图谱失败，请稍后重试"
+        )
+    return {
+        "success": True,
+        "novel_id": novel_id,
+        "deleted": {
+            "characters": counts.get("characters", 0),
+            "events": counts.get("events", 0),
+            "participations": counts.get("character_event_relations", 0),
+            "character_relations": counts.get("character_relations", 0),
+            "event_relations": counts.get("event_relations", 0),
+        },
+    }
+
+
+@router.post(
+    "/{novel_id}/knowledge-graph/re-extract",
+    response_model=KnowledgeGraphResponse,
+)
+async def re_extract_knowledge_graph_endpoint(
+    novel_id: int, payload: KnowledgeGraphRequest
+):
+    """删除后重新抽取知识图谱(走 v2 流水线).
+
+    语义上等价于: DELETE /knowledge-graph + POST /knowledge-graph/v2,
+    但写在一个事务内, 避免"先删后抽"中间状态被前端看到.
+    """
+    if not await get_novel_detail(novel_id):
+        raise HTTPException(status_code=404, detail="小说不存在")
+    try:
+        result = await re_extract_knowledge_graph(
+            novel_id,
+            model_config_id=payload.model_config_id,
+            chunk_size=payload.chunk_size,
+            max_concurrency=payload.max_concurrency,
+            run_validator=payload.run_validator,
+            run_llm_dedup=payload.run_llm_dedup,
+            run_llm_completeness=payload.run_llm_completeness,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("KG re-extract failed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="知识图谱重新提取失败，请稍后重试"
+        )
+
+    stats = result["stats"]
+    summary = (
+        f"重新抽取完成：{stats['characters']} 位人物、{stats['events']} 个事件、"
+        f"{stats['participations']} 条参与、{stats['character_relations']} 条人物关系、"
+        f"{stats['event_relations']} 条事件关系"
+    )
+    validation = result.get("validation")
+    return KnowledgeGraphResponse(
+        success=True,
+        message=summary,
+        model=result.get("model"),
+        chunks_processed=result.get("chunks_processed", 0),
+        characters=result["characters"],
+        events=result["events"],
+        character_event_relations=result["character_event_relations"],
+        character_relations=result["character_relations"],
+        event_relations=result["event_relations"],
+        stats=stats,
+        validation=(
+            KnowledgeGraphValidation(**validation) if validation else None
+        ),
+    )
 
 
 @router.get("/{novel_id}/kg-stats")

@@ -318,6 +318,17 @@ export const api = {
         onEvent,
         signal,
       }),
+    reExtractKnowledgeGraph: (id, payload, options) =>
+      apiRequest(`/novels/${id}/knowledge-graph/re-extract`, {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
+    deleteKnowledgeGraph: (id, options) =>
+      apiRequest(`/novels/${id}/knowledge-graph`, {
+        method: 'DELETE',
+        ...options,
+      }),
     getKgStats: (id, options) =>
       apiRequest(`/novels/${id}/kg-stats`, options),
   },

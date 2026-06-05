@@ -2,10 +2,12 @@ from . import file_service, prompt_service
 from .ai_service import test_connection
 from .image_service import generate_images, upload_reference_image
 from .kg_service import (
+    delete_knowledge_graph,
     extract_knowledge_graph,
     extract_knowledge_graph_streaming,
     extract_knowledge_graph_v2,
     list_knowledge_graph,
+    re_extract_knowledge_graph,
 )
 from .model_service import (
     create_model,
@@ -62,4 +64,6 @@ __all__ = [
     "extract_knowledge_graph_streaming",
     "extract_knowledge_graph_v2",
     "list_knowledge_graph",
+    "delete_knowledge_graph",
+    "re_extract_knowledge_graph",
 ]

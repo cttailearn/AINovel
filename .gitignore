@@ -62,3 +62,8 @@ pytest_full.txt
 # --- Trae IDE（如果存在则忽略）---
 .trae/
 .trae
+
+# --- 调试 / 临时脚本（不入库）---
+backend/_check_*.py
+frontend/tmp/
+_commit_msg.txt

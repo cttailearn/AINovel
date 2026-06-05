@@ -206,10 +206,44 @@ class KnowledgeGraphRequest(BaseModel):
     run_llm_completeness: bool = False
 
 
+class EvidenceSpanOut(BaseModel):
+    """原文引用 span, 支持前端跳转 + 高亮.
+
+    字段语义:
+    * ``chunk_id`` 对应 chunk_novel 输出的 chunk 标识.
+    * ``quote`` 是原文片段 (30~200 字符), 找不到位置时仍可作为提示.
+    * ``start`` / ``end`` 是 quote 在 chunk 文本内的字符 offset, 找不到时为 None.
+    * ``strategy``:
+        - ``"anchor"`` 基于实体名/属性锚点定位, 高置信;
+        - ``"head"`` 段首兜底, 中等;
+        - ``"fallback"`` 找不到, 仅作提示.
+    * ``sentence_idx`` 句子索引, 用于"跳到第 N 句"级别的快速跳转.
+    """
+    chunk_id: str = ""
+    quote: str = ""
+    start: Optional[int] = None
+    end: Optional[int] = None
+    strategy: str = "anchor"
+    sentence_idx: Optional[int] = None
+
+
+class EntityExtras(BaseModel):
+    """人物/事件实体的 evidence + confidence + 抽取上下文.
+
+    前端"原文引用"面板: 遍历 ``evidence`` 列表, 逐条定位 + 高亮.
+    """
+    evidence: List[EvidenceSpanOut] = []
+    confidence: Optional[float] = None
+    chunk_id: Optional[str] = None
+    # 自由扩展位, 例如: 模型版本、抽取时间、反馈重抽标记等.
+    extra: Dict[str, Any] = {}
+
+
 class KnowledgeGraphEntity(BaseModel):
     id: str
     name: str
     attributes: Dict[str, Any] = {}
+    extras: EntityExtras = EntityExtras()
 
 
 class KnowledgeGraphRelation(BaseModel):
@@ -219,6 +253,8 @@ class KnowledgeGraphRelation(BaseModel):
     role: Optional[str] = None
     action: Optional[str] = None
     properties: Dict[str, Any] = {}
+    # 关系的 evidence 通常是两端实体的 span 合并, 前端跳转时逐条渲染.
+    extras: EntityExtras = EntityExtras()
 
 
 class KnowledgeGraphStats(BaseModel):

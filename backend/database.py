@@ -64,6 +64,7 @@ SCHEMA_STATEMENTS: List[str] = [
         name TEXT NOT NULL,
         attributes TEXT,
         model_id INTEGER,
+        extras TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
@@ -79,6 +80,7 @@ SCHEMA_STATEMENTS: List[str] = [
         name TEXT NOT NULL,
         attributes TEXT,
         model_id INTEGER,
+        extras TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
@@ -95,6 +97,8 @@ SCHEMA_STATEMENTS: List[str] = [
         relation TEXT NOT NULL DEFAULT 'PARTICIPATES_IN',
         role TEXT,
         action TEXT,
+        properties TEXT,
+        extras TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
     )
@@ -107,6 +111,7 @@ SCHEMA_STATEMENTS: List[str] = [
         target_entity_id TEXT NOT NULL,
         relation TEXT NOT NULL,
         properties TEXT,
+        extras TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
     )
@@ -119,6 +124,7 @@ SCHEMA_STATEMENTS: List[str] = [
         target_entity_id TEXT NOT NULL,
         relation TEXT NOT NULL,
         properties TEXT,
+        extras TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
     )
@@ -187,6 +193,32 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
             "ALTER TABLE model_configs ADD COLUMN capability TEXT NOT NULL DEFAULT 'chat'"
         )
         logger.info("Migration: added model_configs.capability column")
+
+    # Add properties column to character_event_relations so we can
+    # store the full LLM-emitted property blob (时间 / 地点 / 情绪 /
+    # 动机 / ...) alongside the legacy role / action shortcuts.
+    ce_columns = await _get_table_columns(db, "character_event_relations")
+    if ce_columns and "properties" not in ce_columns:
+        await db.execute(
+            "ALTER TABLE character_event_relations ADD COLUMN properties TEXT"
+        )
+        logger.info(
+            "Migration: added character_event_relations.properties column"
+        )
+
+    # Add extras column to all 5 KG tables for evidence / confidence
+    # / chunk_id (升级 evidence 数据结构后需要落库).
+    for table in (
+        "characters",
+        "events",
+        "character_event_relations",
+        "character_relations",
+        "event_relations",
+    ):
+        cols = await _get_table_columns(db, table)
+        if cols and "extras" not in cols:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN extras TEXT")
+            logger.info("Migration: added %s.extras column", table)
 
 
 @asynccontextmanager
@@ -536,6 +568,90 @@ def _encode_attributes(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _encode_extras(value: Any) -> str:
+    """extras 列的 JSON 编码, 与 _encode_attributes 一致但语义独立, 便于将来拆分."""
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _decode_extras(raw: Any) -> Dict[str, Any]:
+    """extras 列的 JSON 解码, 兼容旧库 (无该列 / 字段为空) 情况."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _build_entity_extras(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """从 LLM 抽出的实体 dict 抽取 evidence / confidence / chunk_id.
+
+    支持:
+    * obj["extras"] 已经是 dict (优先)
+    * obj["evidence"] 是 str 或 List[dict] (EvidenceSpan 列表)
+    * obj["confidence"] 是数字
+    * obj["chunk_id"] 字符串
+    """
+    extras: Dict[str, Any] = {}
+    if "extras" in obj and isinstance(obj["extras"], dict):
+        extras.update(obj["extras"])
+    ev = obj.get("evidence")
+    if ev:
+        if isinstance(ev, str):
+            extras["evidence"] = [{
+                "quote": ev, "chunk_id": obj.get("chunk_id", ""),
+                "start": None, "end": None, "strategy": "fallback",
+            }]
+        elif isinstance(ev, list):
+            extras["evidence"] = ev
+    if "confidence" in obj:
+        extras["confidence"] = obj.get("confidence")
+    if obj.get("chunk_id"):
+        extras.setdefault("chunk_id", obj["chunk_id"])
+    return extras
+
+
+def _build_relation_extras(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """关系类的 extras 构造: 同上, 但 evidence 既可来自单条 span,
+    也可来自两个端点的 span 合并(由 orchestrator 负责)."""
+    return _build_entity_extras(obj)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph CRUD
+# ---------------------------------------------------------------------------
+
+
+async def delete_knowledge_graph(novel_id: int) -> Dict[str, int]:
+    """原子清空指定小说的全部知识图谱.
+
+    返回每张表的删除行数, 便于前端展示"已删除 X 人物 / Y 事件 / Z 关系".
+    """
+    counts: Dict[str, int] = {}
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        for table in (
+            "character_event_relations",
+            "character_relations",
+            "event_relations",
+            "events",
+            "characters",
+        ):
+            cur = await db.execute(
+                f"DELETE FROM {table} WHERE novel_id = ?", (novel_id,)
+            )
+            counts[table] = cur.rowcount or 0
+        await db.commit()
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # Knowledge graph CRUD
 # ---------------------------------------------------------------------------
@@ -562,11 +678,12 @@ async def replace_knowledge_graph(
 
         stored_chars: List[Dict[str, Any]] = []
         for c in characters:
+            extras = c.get("extras") or _build_entity_extras(c)
             cur = await db.execute(
                 """
                 INSERT INTO characters
-                    (novel_id, entity_id, name, attributes, model_id)
-                VALUES (?, ?, ?, ?, ?)
+                    (novel_id, entity_id, name, attributes, model_id, extras)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     novel_id,
@@ -574,6 +691,7 @@ async def replace_knowledge_graph(
                     str(c.get("name", "")).strip()[:200] or "未命名",
                     _encode_attributes(c.get("attributes") or {}),
                     model_id,
+                    _encode_extras(extras),
                 ),
             )
             stored_chars.append(
@@ -584,16 +702,18 @@ async def replace_knowledge_graph(
                     "name": str(c.get("name", "")).strip(),
                     "attributes": c.get("attributes") or {},
                     "model_id": model_id,
+                    "extras": extras if isinstance(extras, dict) else {},
                 }
             )
 
         stored_events: List[Dict[str, Any]] = []
         for e in events:
+            extras = e.get("extras") or _build_entity_extras(e)
             cur = await db.execute(
                 """
                 INSERT INTO events
-                    (novel_id, entity_id, name, attributes, model_id)
-                VALUES (?, ?, ?, ?, ?)
+                    (novel_id, entity_id, name, attributes, model_id, extras)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     novel_id,
@@ -601,6 +721,7 @@ async def replace_knowledge_graph(
                     str(e.get("name", "")).strip()[:200] or "未命名事件",
                     _encode_attributes(e.get("attributes") or {}),
                     model_id,
+                    _encode_extras(extras),
                 ),
             )
             stored_events.append(
@@ -611,17 +732,20 @@ async def replace_knowledge_graph(
                     "name": str(e.get("name", "")).strip(),
                     "attributes": e.get("attributes") or {},
                     "model_id": model_id,
+                    "extras": extras if isinstance(extras, dict) else {},
                 }
             )
 
         stored_ce: List[Dict[str, Any]] = []
         for r in character_event_relations:
+            properties = r.get("properties") if isinstance(r.get("properties"), dict) else {}
+            extras = r.get("extras") or _build_relation_extras(r)
             cur = await db.execute(
                 """
                 INSERT INTO character_event_relations
                     (novel_id, source_entity_id, target_entity_id,
-                     relation, role, action)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     relation, role, action, properties, extras)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     novel_id,
@@ -630,6 +754,8 @@ async def replace_knowledge_graph(
                     str(r.get("relation") or "PARTICIPATES_IN").strip() or "PARTICIPATES_IN",
                     (r.get("role") or None),
                     (r.get("action") or None),
+                    _encode_attributes(properties),
+                    _encode_extras(extras),
                 ),
             )
             stored_ce.append(
@@ -641,17 +767,20 @@ async def replace_knowledge_graph(
                     "relation": str(r.get("relation") or "PARTICIPATES_IN").strip(),
                     "role": r.get("role") or None,
                     "action": r.get("action") or None,
+                    "properties": properties,
+                    "extras": extras if isinstance(extras, dict) else {},
                 }
             )
 
         stored_cc: List[Dict[str, Any]] = []
         for r in character_relations:
+            extras = r.get("extras") or _build_relation_extras(r)
             cur = await db.execute(
                 """
                 INSERT INTO character_relations
                     (novel_id, source_entity_id, target_entity_id,
-                     relation, properties)
-                VALUES (?, ?, ?, ?, ?)
+                     relation, properties, extras)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     novel_id,
@@ -659,6 +788,7 @@ async def replace_knowledge_graph(
                     str(r.get("target") or r.get("target_entity_id") or "").strip(),
                     str(r.get("relation") or "").strip() or "关联",
                     _encode_attributes(r.get("properties") or {}),
+                    _encode_extras(extras),
                 ),
             )
             stored_cc.append(
@@ -669,17 +799,19 @@ async def replace_knowledge_graph(
                     "target_entity_id": str(r.get("target") or "").strip(),
                     "relation": str(r.get("relation") or "").strip() or "关联",
                     "properties": r.get("properties") or {},
+                    "extras": extras if isinstance(extras, dict) else {},
                 }
             )
 
         stored_ee: List[Dict[str, Any]] = []
         for r in event_relations:
+            extras = r.get("extras") or _build_relation_extras(r)
             cur = await db.execute(
                 """
                 INSERT INTO event_relations
                     (novel_id, source_entity_id, target_entity_id,
-                     relation, properties)
-                VALUES (?, ?, ?, ?, ?)
+                     relation, properties, extras)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     novel_id,
@@ -687,6 +819,7 @@ async def replace_knowledge_graph(
                     str(r.get("target") or r.get("target_entity_id") or "").strip(),
                     str(r.get("relation") or "").strip() or "关联",
                     _encode_attributes(r.get("properties") or {}),
+                    _encode_extras(extras),
                 ),
             )
             stored_ee.append(
@@ -697,6 +830,7 @@ async def replace_knowledge_graph(
                     "target_entity_id": str(r.get("target") or "").strip(),
                     "relation": str(r.get("relation") or "").strip() or "关联",
                     "properties": r.get("properties") or {},
+                    "extras": extras if isinstance(extras, dict) else {},
                 }
             )
 
@@ -715,7 +849,7 @@ async def get_knowledge_graph(novel_id: int) -> Dict[str, List[Dict[str, Any]]]:
         cur = await db.execute(
             """
             SELECT id, novel_id, entity_id, name, attributes,
-                   model_id, created_at, updated_at
+                   model_id, extras, created_at, updated_at
             FROM characters WHERE novel_id = ? ORDER BY entity_id
             """,
             (novel_id,),
@@ -724,12 +858,13 @@ async def get_knowledge_graph(novel_id: int) -> Dict[str, List[Dict[str, Any]]]:
         for r in await cur.fetchall():
             row = dict(r)
             row["attributes"] = _decode_attributes(row.get("attributes"))
+            row["extras"] = _decode_extras(row.get("extras"))
             characters.append(row)
 
         cur = await db.execute(
             """
             SELECT id, novel_id, entity_id, name, attributes,
-                   model_id, created_at, updated_at
+                   model_id, extras, created_at, updated_at
             FROM events WHERE novel_id = ? ORDER BY entity_id
             """,
             (novel_id,),
@@ -738,22 +873,28 @@ async def get_knowledge_graph(novel_id: int) -> Dict[str, List[Dict[str, Any]]]:
         for r in await cur.fetchall():
             row = dict(r)
             row["attributes"] = _decode_attributes(row.get("attributes"))
+            row["extras"] = _decode_extras(row.get("extras"))
             events.append(row)
 
         cur = await db.execute(
             """
             SELECT id, novel_id, source_entity_id, target_entity_id,
-                   relation, role, action
+                   relation, role, action, properties, extras
             FROM character_event_relations WHERE novel_id = ?
             """,
             (novel_id,),
         )
-        ce_relations = _rows_to_dicts(await cur.fetchall())
+        ce_relations: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["properties"] = _decode_attributes(row.get("properties"))
+            row["extras"] = _decode_extras(row.get("extras"))
+            ce_relations.append(row)
 
         cur = await db.execute(
             """
             SELECT id, novel_id, source_entity_id, target_entity_id,
-                   relation, properties
+                   relation, properties, extras
             FROM character_relations WHERE novel_id = ?
             """,
             (novel_id,),
@@ -762,12 +903,13 @@ async def get_knowledge_graph(novel_id: int) -> Dict[str, List[Dict[str, Any]]]:
         for r in await cur.fetchall():
             row = dict(r)
             row["properties"] = _decode_attributes(row.get("properties"))
+            row["extras"] = _decode_extras(row.get("extras"))
             cc_relations.append(row)
 
         cur = await db.execute(
             """
             SELECT id, novel_id, source_entity_id, target_entity_id,
-                   relation, properties
+                   relation, properties, extras
             FROM event_relations WHERE novel_id = ?
             """,
             (novel_id,),
@@ -776,6 +918,7 @@ async def get_knowledge_graph(novel_id: int) -> Dict[str, List[Dict[str, Any]]]:
         for r in await cur.fetchall():
             row = dict(r)
             row["properties"] = _decode_attributes(row.get("properties"))
+            row["extras"] = _decode_extras(row.get("extras"))
             ee_relations.append(row)
 
     return {
