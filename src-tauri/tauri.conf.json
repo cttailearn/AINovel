@@ -47,9 +47,13 @@
         "language": "zh-CN"
       },
       "nsis": {
-        "displayLanguage": "zh-CN",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
-        "installMode": "perUser"
+        "installMode": "currentUser"
       }
     }
   }
