@@ -124,6 +124,32 @@ def test_build_chapters_from_matches_monotonic():
         assert chapters[i].start_position > chapters[i - 1].start_position
 
 
+def test_build_chapters_title_includes_inline_subtitle():
+    """标题应延伸到行末，保留"第28章：标题"这类同行副标题。"""
+    import re
+    text = (
+        "楔子 序幕初开\n"
+        "旧事已矣，遗音尚存。\n"
+        "\n"
+        "第二十八章 你们一起上吧\n"
+        "唐银与马红俊一击必中。\n"
+        "\n"
+        "第二十九章 另起波澜\n"
+        "下一段内容。\n"
+    )
+    pattern = re.compile(r"^\s*((?:楔子|序幕|第[一二三四五六七八九十百千零\d]+章))", re.MULTILINE)
+    matches = list(pattern.finditer(text))
+    chapters = _build_chapters_from_matches(text, matches)
+    assert [c.chapter_number for c in chapters] == [1, 2, 3]
+    assert chapters[0].title.startswith("楔子")
+    assert chapters[1].title == "第二十八章 你们一起上吧"
+    assert chapters[2].title == "第二十九章 另起波澜"
+    # 起始位置仍然只是匹配位置（不影响切片）
+    assert chapters[1].start_position == text.index("第二十八章")
+    # 章节之间不重叠
+    assert chapters[1].end_position == chapters[2].start_position
+
+
 def test_read_text_slice_chinese_char_offsets():
     """回归测试：start/end 是字符偏移，UTF-8 多字节字符不能按字节切。
 

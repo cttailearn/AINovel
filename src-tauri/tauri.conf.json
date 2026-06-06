@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data: blob: http://127.0.0.1:* https:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://localhost:*"
     }
   },
   "bundle": {
@@ -39,6 +39,18 @@
     "category": "Productivity",
     "copyright": "© 2026",
     "shortDescription": "AI 小说管理系统",
-    "longDescription": "基于 AI 的本地小说管理与解析工具"
+    "longDescription": "基于 AI 的本地小说管理与解析工具",
+    "resources": [],
+    "externalBin": [],
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      },
+      "nsis": {
+        "displayLanguage": "zh-CN",
+        "installerIcon": "icons/icon.ico",
+        "installMode": "perUser"
+      }
+    }
   }
 }

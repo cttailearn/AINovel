@@ -1593,6 +1593,265 @@ input:checked + .slider:before {
   opacity: 0.7;
 }
 
+.parse-btn.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.parse-btn.primary:hover:not(:disabled) {
+  opacity: 0.9;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.3);
+}
+
+/* === 新版：配置章节拆分规则 === */
+.parse-config {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.85rem 1rem;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+[data-theme="light"] .parse-config {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  line-height: 1.6;
+}
+
+.radio-row > input[type="radio"] {
+  accent-color: var(--primary);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.radio-row > input[type="radio"]:disabled ~ * {
+  opacity: 0.5;
+}
+
+.check-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.check-flag input[type="checkbox"] {
+  accent-color: var(--primary);
+  width: 13px;
+  height: 13px;
+  cursor: default;
+}
+
+.config-select,
+.config-input {
+  padding: 0.4rem 0.7rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  transition: border-color 0.15s ease;
+  min-width: 0;
+}
+
+.config-select {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.config-input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.config-select:focus,
+.config-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.config-select:disabled,
+.config-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sub-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding-left: 1.65rem;
+  flex-wrap: wrap;
+}
+
+.sub-row .inline-label {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.parse-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 0.35rem;
+  border-top: 1px dashed var(--border);
+  margin-top: 0.25rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.preview-toggle .eye-icon {
+  color: var(--primary);
+  font-size: 0.9rem;
+}
+
+.preview-count {
+  font-size: 0.75rem;
+  font-weight: normal;
+  color: var(--text-tertiary);
+  margin-left: 0.3rem;
+}
+
+.parse-secondary {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+/* === 章节预览面板 === */
+.chapter-preview-panel {
+  margin-top: 0.75rem;
+  padding: 1rem 1.25rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.chapter-preview-panel.empty,
+.chapter-preview-panel.error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  background: rgba(0, 0, 0, 0.05);
+  border-style: dashed;
+}
+
+[data-theme="light"] .chapter-preview-panel.empty,
+[data-theme="light"] .chapter-preview-panel.error {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.empty-doc-icon {
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-tertiary);
+  margin-bottom: 0.75rem;
+}
+
+.empty-title {
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  font-weight: 500;
+  margin-bottom: 0.25rem;
+}
+
+.empty-sub {
+  font-size: 0.8rem;
+  color: var(--text-tertiary);
+}
+
+.chapter-preview-panel.error .empty-title {
+  color: var(--error);
+}
+
+.preview-summary {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.6rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.preview-summary strong {
+  color: var(--primary);
+  font-size: 1rem;
+  margin: 0 0.2rem;
+}
+
+.preview-full-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.preview-full-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.83rem;
+  color: var(--text-primary);
+  transition: background 0.1s ease;
+}
+
+.preview-full-list li:hover {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.preview-full-list .preview-num {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+  min-width: 38px;
+  flex-shrink: 0;
+}
+
+.preview-full-list .preview-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .parse-result {
   display: flex;
   align-items: center;
@@ -1866,6 +2125,9 @@ input:checked + .slider:before {
   flex-direction: column;
   background: var(--reader-bg, #f8f5f0);
   z-index: 1000;
+  /* 阅读主题基色：让所有未显式声明颜色的子元素继承阅读主题，
+     避免被应用主题（--text-primary/--text-secondary）污染 */
+  color: var(--reader-color, #333);
 }
 
 .novel-reader.loading,
@@ -1875,7 +2137,8 @@ input:checked + .slider:before {
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  color: var(--text-secondary);
+  color: var(--reader-color, #333);
+  opacity: 0.7;
 }
 
 .reader-toolbar {
@@ -1883,7 +2146,7 @@ input:checked + .slider:before {
   align-items: center;
   padding: 0.75rem 1.25rem;
   background: var(--sidebar-bg, #fff);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid color-mix(in srgb, var(--reader-color, #333) 15%, transparent);
   gap: 1rem;
   position: relative;
 }
@@ -1892,9 +2155,9 @@ input:checked + .slider:before {
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.05);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--reader-color, #333) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--reader-color, #333) 15%, transparent);
+  color: var(--reader-color, #333);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1939,8 +2202,8 @@ input:checked + .slider:before {
 .reader-subtitle {
   font-family: 'Noto Sans SC', 'Inter', sans-serif;
   font-size: 0.7rem;
-  color: var(--text-secondary);
-  opacity: 0.75;
+  color: var(--reader-color, #333);
+  opacity: 0.65;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1980,10 +2243,11 @@ input:checked + .slider:before {
   max-height: calc(100vh - 90px);
   overflow-y: auto;
   background: var(--sidebar-bg, #fff);
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--reader-color, #333) 15%, transparent);
   border-radius: 14px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
   z-index: 1001;
+  color: var(--reader-color, #333);
   animation: panelSlideIn 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -2005,7 +2269,7 @@ input:checked + .slider:before {
   align-items: center;
   justify-content: space-between;
   padding: 1rem 1.1rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid color-mix(in srgb, var(--reader-color, #333) 15%, transparent);
 }
 
 .settings-header h3,
@@ -2024,8 +2288,8 @@ input:checked + .slider:before {
   height: 28px;
   border-radius: 6px;
   background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
+  border: 1px solid color-mix(in srgb, var(--reader-color, #333) 15%, transparent);
+  color: var(--reader-color, #333);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -2053,10 +2317,10 @@ input:checked + .slider:before {
 .find-row input[type="text"] {
   flex: 1;
   padding: 0.55rem 0.75rem;
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--reader-color, #333) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--reader-color, #333) 18%, transparent);
   border-radius: 8px;
-  color: var(--text-primary);
+  color: var(--reader-color, #333);
   font-family: inherit;
   font-size: 0.85rem;
   outline: none;
@@ -2070,7 +2334,7 @@ input:checked + .slider:before {
 
 .settings-section {
   padding: 1rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid color-mix(in srgb, var(--reader-color, #333) 15%, transparent);
 }
 
 .settings-section:last-child {
@@ -2080,7 +2344,8 @@ input:checked + .slider:before {
 .settings-section label {
   display: block;
   font-size: 0.8rem;
-  color: var(--text-secondary);
+  color: var(--reader-color, #333);
+  opacity: 0.75;
   margin-bottom: 0.5rem;
 }
 
@@ -2088,7 +2353,7 @@ input:checked + .slider:before {
   width: 100%;
   height: 6px;
   border-radius: 3px;
-  background: var(--border);
+  background: color-mix(in srgb, var(--reader-color, #333) 15%, transparent);
   appearance: none;
   cursor: pointer;
 }
@@ -2110,7 +2375,7 @@ input:checked + .slider:before {
 
 .preset-btn {
   padding: 0.4rem 0.75rem;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--reader-color, #333) 18%, transparent);
   border-radius: 6px;
   font-size: 0.75rem;
   cursor: pointer;
@@ -2167,11 +2432,11 @@ input:checked + .slider:before {
 .form-row input {
   flex: 1;
   padding: 0.5rem 0.75rem;
-  background: rgba(0, 0, 0, 0.05);
-  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--reader-color, #333) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--reader-color, #333) 18%, transparent);
   border-radius: 6px;
   font-size: 0.85rem;
-  color: var(--text-primary);
+  color: var(--reader-color, #333);
 }
 
 .form-row input:focus {
@@ -2208,9 +2473,10 @@ input:checked + .slider:before {
 
 .find-results-info {
   font-size: 0.8rem;
-  color: var(--text-secondary);
+  color: var(--reader-color, #333);
+  opacity: 0.75;
   padding: 0.5rem;
-  background: rgba(0, 0, 0, 0.05);
+  background: color-mix(in srgb, var(--reader-color, #333) 5%, transparent);
   border-radius: 6px;
 }
 
@@ -2245,10 +2511,12 @@ input:checked + .slider:before {
 .reader-sidebar {
   width: 280px;
   background: var(--sidebar-bg, #fff);
-  border-right: 1px solid var(--border);
+  border-right: 1px solid color-mix(in srgb, var(--sidebar-color, #333) 15%, transparent);
   display: flex;
   flex-direction: column;
   transition: width 0.3s ease;
+  flex-shrink: 0;
+  box-shadow: 4px 0 12px rgba(0, 0, 0, 0.04);
 }
 
 .reader-sidebar.collapsed {
@@ -2260,7 +2528,7 @@ input:checked + .slider:before {
   align-items: center;
   justify-content: space-between;
   padding: 1rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid color-mix(in srgb, var(--sidebar-color, #333) 15%, transparent);
 }
 
 .sidebar-header h3 {
@@ -2278,12 +2546,17 @@ input:checked + .slider:before {
   height: 28px;
   border-radius: 6px;
   background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
+  border: 1px solid color-mix(in srgb, var(--sidebar-color, #333) 20%, transparent);
+  color: var(--sidebar-color, #333);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.collapse-btn:hover {
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--primary);
 }
 
 .chapter-list {
@@ -2301,14 +2574,14 @@ input:checked + .slider:before {
 }
 
 .chapter-list::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: color-mix(in srgb, var(--sidebar-color, #333) 25%, transparent);
   border-radius: 3px;
 }
 
 .chapter-item {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.6rem;
   width: 100%;
   padding: 0.6rem 0.75rem;
   background: transparent;
@@ -2318,32 +2591,39 @@ input:checked + .slider:before {
   cursor: pointer;
   transition: all 0.2s ease;
   color: var(--sidebar-color, #333);
+  margin-bottom: 2px;
 }
 
 .chapter-item:hover {
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(99, 102, 241, 0.12);
+  color: var(--primary);
 }
 
 .chapter-item.active {
   background: var(--primary);
-  color: white;
+  color: #ffffff;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
 }
 
 .chapter-num {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.1);
+  background: var(--sidebar-color, #333);
+  color: var(--sidebar-bg, #fff);
   border-radius: 4px;
-  font-size: 0.7rem;
-  font-weight: 600;
+  font-size: 0.72rem;
+  font-weight: 700;
   flex-shrink: 0;
+  line-height: 1;
 }
 
 .chapter-item.active .chapter-num {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.22);
+  color: #ffffff;
 }
 
 .chapter-title {
@@ -2351,6 +2631,8 @@ input:checked + .slider:before {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* 强制继承 .chapter-item 的颜色（不要被应用主题 --text-primary 覆盖） */
+  color: inherit;
 }
 
 .reader-content {
@@ -2369,7 +2651,8 @@ input:checked + .slider:before {
   align-items: center;
   justify-content: center;
   gap: 1rem;
-  color: var(--text-secondary);
+  color: var(--reader-color, #333);
+  opacity: 0.6;
   font-family: 'Noto Serif SC', 'EB Garamond', serif;
   letter-spacing: 0.1em;
 }
@@ -2602,7 +2885,7 @@ input:checked + .slider:before {
   flex-direction: column;
   gap: 0;
   background: var(--sidebar-bg, #fff);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid color-mix(in srgb, var(--reader-color, #333) 15%, transparent);
   position: relative;
   z-index: 5;
 }
@@ -2610,7 +2893,7 @@ input:checked + .slider:before {
 .nav-progress-track {
   position: relative;
   height: 2px;
-  background: rgba(0, 0, 0, 0.05);
+  background: color-mix(in srgb, var(--reader-color, #333) 8%, transparent);
   overflow: hidden;
 }
 
@@ -2634,9 +2917,9 @@ input:checked + .slider:before {
   gap: 0.45rem;
   padding: 0.55rem 1.1rem;
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--reader-color, #333) 20%, transparent);
   border-radius: 999px;
-  color: var(--text-primary);
+  color: var(--reader-color, #333);
   font-family: 'Noto Sans SC', 'Inter', sans-serif;
   font-size: 0.85rem;
   font-weight: 500;
@@ -2675,14 +2958,14 @@ input:checked + .slider:before {
   align-items: baseline;
   gap: 0.35rem;
   font-family: 'Cormorant Garamond', 'EB Garamond', serif;
-  color: var(--text-secondary);
+  color: var(--reader-color, #333);
   user-select: none;
 }
 
 .progress-current {
   font-size: 1.35rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--reader-color, #333);
   font-variant-numeric: tabular-nums;
 }
 

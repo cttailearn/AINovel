@@ -108,16 +108,33 @@ def _build_chapters_from_matches(
 ) -> List[Chapter]:
     total = len(content)
     chapters: List[Chapter] = []
+
+    def _normalize_start(pos: int) -> int:
+        """跳过 pos 处的横向空白与换行符，返回真实内容起点。"""
+        while pos < total and content[pos] in " \t\r\n":
+            pos += 1
+        return pos
+
     for idx, m in enumerate(matches):
-        start = m.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else total
-        if end < start:
-            end = start
+        title_start = _normalize_start(m.start())
+        if idx + 1 < len(matches):
+            end = _normalize_start(matches[idx + 1].start())
+        else:
+            end = total
+        if end < title_start:
+            end = title_start
+        # 标题延伸到行末（同行内的章节名/副标题等），
+        # 但不超过下一章节起始位置，避免吞并下一章。
+        newline_pos = content.find("\n", title_start)
+        if newline_pos == -1:
+            newline_pos = total
+        title_end = min(newline_pos, end)
+        title = content[title_start:title_end].strip()[:200]
         chapters.append(
             Chapter(
                 chapter_number=idx + 1,
-                title=m.group(0).strip()[:200],
-                start_position=start,
+                title=title,
+                start_position=title_start,
                 end_position=end,
             )
         )

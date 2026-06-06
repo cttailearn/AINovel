@@ -1,8 +1,16 @@
-import { useEffect, useReducer, useRef, useState } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { ApiError, api } from '../api/client.js';
 import { ConfirmDialog } from './Modal/ConfirmDialog.jsx';
 import { useToast } from './Toast/ToastProvider.jsx';
-import { PRESET_RULES, tryCompileRegex } from '../utils/regex.js';
+import {
+  buildSimpleRule,
+  DEFAULT_EXTRA_RULE,
+  NUMBER_TYPE_OPTIONS,
+  PARSE_MODE,
+  PREFIX_OPTIONS,
+  PRESET_RULES,
+  tryCompileRegex,
+} from '../utils/regex.js';
 import NovelReader from './NovelReader.jsx';
 
 const DEFAULT_RULE = PRESET_RULES[0].value;
@@ -186,11 +194,62 @@ function ChapterContentPanel({ chapter, onClose }) {
   );
 }
 
+function ChapterPreviewPanel({ preview }) {
+  if (!preview) {
+    return (
+      <div className="chapter-preview-panel empty">
+        <div className="empty-doc-icon" aria-hidden>
+          <svg width="42" height="42" viewBox="0 0 24 24" fill="none">
+            <path
+              d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"
+              stroke="currentColor"
+              strokeWidth="1.5"
+            />
+            <path d="M14 2v6h6" stroke="currentColor" strokeWidth="1.5" />
+          </svg>
+        </div>
+        <p className="empty-title">准备就绪</p>
+        <p className="empty-sub">点击「预览」可在此查看章节拆分效果</p>
+      </div>
+    );
+  }
+  if (preview.error) {
+    return (
+      <div className="chapter-preview-panel error">
+        <p className="empty-title">预览失败</p>
+        <p className="empty-sub">{preview.error}</p>
+      </div>
+    );
+  }
+  const items = preview.preview || [];
+  return (
+    <div className="chapter-preview-panel">
+      <div className="preview-summary">
+        共匹配 <strong>{preview.chapters_found}</strong> 个章节
+      </div>
+      {items.length > 0 && (
+        <ol className="preview-full-list">
+          {items.map((c) => (
+            <li key={c.chapter_number}>
+              <span className="preview-num">#{c.chapter_number}</span>
+              <span className="preview-title">{c.title}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 const initialState = {
   novel: null,
   loading: false,
   error: null,
+  parseMode: PARSE_MODE.SIMPLE,
   parseRule: DEFAULT_RULE,
+  prefix: PREFIX_OPTIONS[0].value,
+  numberType: 'mixed',
+  extraRule: DEFAULT_EXTRA_RULE,
   parsing: false,
   parseResult: null,
   preview: null,
@@ -225,6 +284,14 @@ function detailReducer(state, action) {
       return { ...state, loading: false, error: action.error };
     case 'SET_RULE':
       return { ...state, parseRule: action.rule, parseResult: null, preview: null };
+    case 'SET_MODE':
+      return { ...state, parseMode: action.mode, parseResult: null, preview: null };
+    case 'SET_PREFIX':
+      return { ...state, prefix: action.prefix, parseResult: null, preview: null };
+    case 'SET_NUMBER_TYPE':
+      return { ...state, numberType: action.numberType, parseResult: null, preview: null };
+    case 'SET_EXTRA_RULE':
+      return { ...state, extraRule: action.extraRule, parseResult: null, preview: null };
     case 'PARSE_START':
       return { ...state, parsing: true, parseResult: null, preview: null };
     case 'PARSE_OK':
@@ -301,19 +368,49 @@ function NovelDetailView({
     }
   };
 
-  const handlePreview = async () => {
+  // 当前生效的正则（按模式计算）
+  const activeRule = useMemo(() => {
+    if (state.parseMode === PARSE_MODE.SIMPLE) {
+      return buildSimpleRule({
+        prefix: state.prefix,
+        numberType: state.numberType,
+        extraRule: state.extraRule,
+      });
+    }
+    return state.parseRule;
+  }, [
+    state.parseMode,
+    state.prefix,
+    state.numberType,
+    state.extraRule,
+    state.parseRule,
+  ]);
+
+  const requireRule = (action) => {
+    if (state.parseMode === PARSE_MODE.SIMPLE) {
+      if (!state.extraRule.trim()) {
+        toast.error('请填写附加规则');
+        return false;
+      }
+      return true;
+    }
     if (!state.parseRule.trim()) {
       toast.error('请输入解析规则');
-      return;
+      return false;
     }
     const compile = tryCompileRegex(state.parseRule);
     if (!compile.ok) {
       toast.error(`无效正则: ${compile.error}`);
-      return;
+      return false;
     }
+    return true;
+  };
+
+  const handlePreview = async () => {
+    if (!requireRule()) return;
     dispatch({ type: 'PREVIEW_START' });
     try {
-      const preview = await api.novels.parsePreview(novelId, state.parseRule);
+      const preview = await api.novels.parsePreview(novelId, activeRule);
       dispatch({ type: 'PREVIEW_OK', preview });
       if (preview.chapters_found === 0) {
         toast.info('未匹配到任何章节');
@@ -327,18 +424,10 @@ function NovelDetailView({
   };
 
   const handleParse = async () => {
-    if (!state.parseRule.trim()) {
-      toast.error('请输入解析规则');
-      return;
-    }
-    const compile = tryCompileRegex(state.parseRule);
-    if (!compile.ok) {
-      toast.error(`无效正则: ${compile.error}`);
-      return;
-    }
+    if (!requireRule()) return;
     dispatch({ type: 'PARSE_START' });
     try {
-      const result = await api.novels.parse(novelId, state.parseRule);
+      const result = await api.novels.parse(novelId, activeRule);
       dispatch({ type: 'PARSE_OK', result });
       if (result.success) {
         toast.success(result.message);
@@ -491,84 +580,151 @@ function NovelDetailView({
           )}
         </div>
 
-        <div className="preset-rules">
-          <span className="preset-label">预设规则：</span>
-          {PRESET_RULES.map((rule) => (
-            <button
-              key={rule.value}
-              type="button"
-              className={`preset-btn ${state.parseRule === rule.value ? 'active' : ''}`}
-              onClick={() => dispatch({ type: 'SET_RULE', rule: rule.value })}
-              title={rule.value}
+        <div className="parse-config">
+          <label className="radio-row">
+            <input
+              type="radio"
+              name="parse-mode"
+              checked={state.parseMode === PARSE_MODE.SIMPLE}
+              onChange={() => dispatch({ type: 'SET_MODE', mode: PARSE_MODE.SIMPLE })}
+            />
+            <span>简单规则</span>
+            <span className="check-flag">
+              <input
+                type="checkbox"
+                checked
+                readOnly
+                tabIndex={-1}
+                aria-label="行首标识启用"
+              />
+              <span>行首标识</span>
+            </span>
+            <select
+              className="config-select"
+              value={state.prefix}
+              onChange={(e) => dispatch({ type: 'SET_PREFIX', prefix: e.target.value })}
+              disabled={state.parseMode !== PARSE_MODE.SIMPLE}
             >
-              {rule.label}
-            </button>
-          ))}
-        </div>
+              {PREFIX_OPTIONS.map((opt) => (
+                <option key={`p-${opt.label}`} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <select
+              className="config-select"
+              value={state.numberType}
+              onChange={(e) =>
+                dispatch({ type: 'SET_NUMBER_TYPE', numberType: e.target.value })
+              }
+              disabled={state.parseMode !== PARSE_MODE.SIMPLE}
+            >
+              {NUMBER_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <select
+              className="config-select"
+              value={state.extraRule}
+              onChange={(e) =>
+                dispatch({ type: 'SET_EXTRA_RULE', extraRule: e.target.value })
+              }
+              disabled={state.parseMode !== PARSE_MODE.SIMPLE}
+              title="附加规则预设"
+            >
+              <option value={DEFAULT_EXTRA_RULE}>[章回卷节部]</option>
+              <option value="">[不使用附加规则]</option>
+              <option value={DEFAULT_EXTRA_RULE}>[章回卷节部+特殊章]</option>
+            </select>
+          </label>
 
-        <div className="rule-input-group">
-          <input
-            type="text"
-            value={state.parseRule}
-            onChange={(e) => dispatch({ type: 'SET_RULE', rule: e.target.value })}
-            placeholder="输入正则表达式"
-          />
-          <button
-            className="parse-btn"
-            type="button"
-            onClick={handlePreview}
-            disabled={state.previewing}
-          >
-            {state.previewing ? <span className="loading-spinner"></span> : '预览'}
-          </button>
-          <button
-            className="parse-btn"
-            type="button"
-            onClick={handleParse}
-            disabled={state.parsing}
-          >
-            {state.parsing ? <span className="loading-spinner"></span> : '解析'}
-          </button>
-        </div>
-
-        <div className="rule-input-group">
-          <label className="inline-label">固定字数：</label>
-          <select
-            value={chunkSize}
-            onChange={(e) => setChunkSize(Number(e.target.value))}
-          >
-            <option value={3000}>3000字</option>
-            <option value={5000}>5000字</option>
-            <option value={8000}>8000字</option>
-            <option value={10000}>10000字</option>
-          </select>
-          <button
-            className="parse-btn"
-            type="button"
-            onClick={handleParseFixed}
-            disabled={state.parsingFixed}
-          >
-            {state.parsingFixed ? <span className="loading-spinner"></span> : '按字数切分'}
-          </button>
-        </div>
-
-        {state.preview && !state.preview.error && (
-          <div className="parse-preview">
-            <span>预计匹配 {state.preview.chapters_found} 个章节</span>
-            {state.preview.preview?.length > 0 && (
-              <ul className="preview-list">
-                {state.preview.preview.slice(0, 5).map((c) => (
-                  <li key={c.chapter_number}>
-                    #{c.chapter_number} {c.title}
-                  </li>
-                ))}
-                {state.preview.preview.length > 5 && (
-                  <li>... 等共 {state.preview.preview.length} 个</li>
-                )}
-              </ul>
-            )}
+          <div className="sub-row">
+            <span className="inline-label">附加规则</span>
+            <input
+              type="text"
+              className="config-input"
+              value={state.extraRule}
+              onChange={(e) =>
+                dispatch({ type: 'SET_EXTRA_RULE', extraRule: e.target.value })
+              }
+              placeholder="^\\s*(序章|序幕|序[1-9]|序曲|楔子|前言|后记|尾声|番外|最终章)"
+              disabled={state.parseMode !== PARSE_MODE.SIMPLE}
+            />
           </div>
-        )}
+
+          <label className="radio-row">
+            <input
+              type="radio"
+              name="parse-mode"
+              checked={state.parseMode === PARSE_MODE.REGEX}
+              onChange={() => dispatch({ type: 'SET_MODE', mode: PARSE_MODE.REGEX })}
+            />
+            <span>正则表达式</span>
+            <input
+              type="text"
+              className="config-input"
+              value={state.parseRule}
+              onChange={(e) => dispatch({ type: 'SET_RULE', rule: e.target.value })}
+              placeholder="^\\s*(\\d+)\\s+(.+)$"
+              disabled={state.parseMode !== PARSE_MODE.REGEX}
+            />
+          </label>
+
+          <div className="parse-actions-row">
+            <div className="preview-toggle">
+              <span className="eye-icon" aria-hidden>◉</span>
+              <span>章节预览</span>
+              {state.preview && !state.preview.error && (
+                <span className="preview-count">
+                  {state.preview.chapters_found} 个
+                </span>
+              )}
+            </div>
+            <button
+              className="parse-btn"
+              type="button"
+              onClick={handlePreview}
+              disabled={state.previewing}
+            >
+              {state.previewing ? <span className="loading-spinner"></span> : '▶ 预览'}
+            </button>
+          </div>
+        </div>
+
+        <ChapterPreviewPanel preview={state.preview} />
+
+        <div className="parse-secondary">
+          <div className="rule-input-group">
+            <label className="inline-label">固定字数：</label>
+            <select
+              value={chunkSize}
+              onChange={(e) => setChunkSize(Number(e.target.value))}
+            >
+              <option value={3000}>3000字</option>
+              <option value={5000}>5000字</option>
+              <option value={8000}>8000字</option>
+              <option value={10000}>10000字</option>
+            </select>
+            <button
+              className="parse-btn"
+              type="button"
+              onClick={handleParseFixed}
+              disabled={state.parsingFixed}
+            >
+              {state.parsingFixed ? <span className="loading-spinner"></span> : '按字数切分'}
+            </button>
+            <button
+              className="parse-btn primary"
+              type="button"
+              onClick={handleParse}
+              disabled={state.parsing}
+            >
+              {state.parsing ? <span className="loading-spinner"></span> : '解析'}
+            </button>
+          </div>
+        </div>
 
         {state.parseResult && (
           <div className={`parse-result ${state.parseResult.success ? 'success' : 'error'}`}>
