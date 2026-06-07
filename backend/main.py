@@ -17,6 +17,7 @@ from config import (
 )
 from database import init_db
 from routers import (
+    enrichment_router,
     image_router,
     models_router,
     novels_router,
@@ -77,6 +78,7 @@ app.include_router(models_router)
 app.include_router(novels_router)
 app.include_router(prompts_router)
 app.include_router(image_router)
+app.include_router(enrichment_router)
 
 
 @app.get("/api")

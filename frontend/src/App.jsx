@@ -6,6 +6,7 @@ import { PromptManagerPanel } from './components/PromptManagerPanel.jsx';
 import { Workbench } from './components/Workbench.jsx';
 import { KnowledgeGraphPage } from './components/KnowledgeGraphPage.jsx';
 import { ImageGenerationPage } from './components/ImageGenerationPage.jsx';
+import { EnrichmentPage } from './components/EnrichmentPage.jsx';
 import { useTheme } from './ThemeContext.jsx';
 import './App.css';
 
@@ -94,6 +95,17 @@ const NAV_ITEMS = [
     ),
   },
   {
+    key: 'enrichment',
+    title: '加料工作台',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
+        <path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="currentColor" strokeLinecap="round" />
+        <circle cx="12" cy="12" r="4" stroke="currentColor" />
+        <path d="M9 12h.01M12 12h.01M15 12h.01" stroke="currentColor" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
     key: 'settings',
     title: '系统设置',
     icon: (
@@ -114,6 +126,7 @@ const PAGE_META = {
   workbench: { title: '我的项目', sub: '管理并解析你的小说项目' },
   knowledge: { title: '知识图谱', sub: '查看人物、事件与关系' },
   image: { title: '图像生成', sub: '文生图 / 图生图，多模型、多风格' },
+  enrichment: { title: '小说加料', sub: 'AI 摘要、识别与改写，按章节流水线处理' },
   settings: { title: '系统设置', sub: '配置模型与提示词' },
 };
 
@@ -233,7 +246,9 @@ export default function App() {
                     ? '搜索小说标题或作者...'
                     : activeNav === 'image'
                       ? '搜索结果...'
-                      : '在设置中搜索...'
+                      : activeNav === 'enrichment'
+                        ? '搜索加料工作台中的小说...'
+                        : '在设置中搜索...'
               }
               value={topSearch}
               onChange={(e) => setTopSearch(e.target.value)}
@@ -263,6 +278,8 @@ export default function App() {
             <KnowledgeGraphPage models={models} topSearch={topSearch} />
           ) : activeNav === 'image' ? (
             <ImageGenerationPage models={models} topSearch={topSearch} />
+          ) : activeNav === 'enrichment' ? (
+            <EnrichmentPage models={models} topSearch={topSearch} />
           ) : modelsLoading ? (
             <div className="loading-block">
               <div className="loading-spinner large"></div>

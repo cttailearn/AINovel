@@ -17,6 +17,7 @@ from database import (
     get_novel_by_id,
     replace_chapters,
     save_novel,
+    update_chapter,
     update_novel_file_path,
     update_novel_parse_rule,
     update_novel_status,
@@ -291,6 +292,38 @@ async def update_novel_info(
     new_title = title.strip() if title else novel["title"]
     new_author = author.strip() if author else novel["author"]
     return await update_novel_title_author(novel_id, new_title, new_author)
+
+
+async def update_chapter_info(
+    novel_id: int,
+    chapter_id: int,
+    *,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+) -> bool:
+    """更新章节的标题或正文(用于阅读器内编辑).
+
+    至少需要传一个字段;都不传视为无操作,返回 False.
+    """
+    has_change = False
+    new_title: Optional[str] = None
+    new_content: Optional[str] = None
+    if title is not None:
+        stripped = title.strip()
+        if stripped:
+            new_title = stripped
+            has_change = True
+    if content is not None:
+        new_content = content
+        has_change = True
+    if not has_change:
+        return False
+    chapter = await get_chapter_with_file(novel_id, chapter_id)
+    if not chapter:
+        return False
+    return await update_chapter(
+        novel_id, chapter_id, title=new_title, content=new_content
+    )
 
 
 async def delete_novel(novel_id: int) -> bool:

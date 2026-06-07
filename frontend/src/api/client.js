@@ -266,6 +266,12 @@ export const api = {
       apiRequest(`/novels/${id}`, { method: 'DELETE', ...options }),
     chapter: (novelId, chapterId, options) =>
       apiRequest(`/novels/${novelId}/chapters/${chapterId}`, options),
+    updateChapter: (novelId, chapterId, payload, options) =>
+      apiRequest(`/novels/${novelId}/chapters/${chapterId}`, {
+        method: 'PUT',
+        body: payload,
+        ...options,
+      }),
     setParseRule: (id, rule, options) =>
       apiRequest(`/novels/${id}/parse-rule`, {
         method: 'PUT',
@@ -354,5 +360,52 @@ export const api = {
         fieldName: 'file',
         signal,
       }),
+  },
+  enrichment: {
+    listProgress: (novelId, options) =>
+      apiRequest(`/enrichment/novels/${novelId}/progress`, options),
+    getDetail: (chapterId, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}`, options),
+    updateDetail: (chapterId, payload, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}`, {
+        method: 'PUT',
+        body: payload,
+        ...options,
+      }),
+    runSummary: (chapterId, payload, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}/summary`, {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
+    runRecognition: (chapterId, payload, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}/recognition`, {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
+    runRewrite: (chapterId, payload, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}/rewrite`, {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
+    batch: (novelId, payload, { onEvent, signal } = {}) =>
+      postStream(`/enrichment/novels/${novelId}/batch`, payload, {
+        onEvent,
+        signal,
+      }),
+    retryFailed: (novelId, options) =>
+      apiRequest(`/enrichment/novels/${novelId}/retry-failed`, {
+        method: 'POST',
+        ...options,
+      }),
+    reset: (novelId, options) =>
+      apiRequest(`/enrichment/novels/${novelId}/reset`, {
+        method: 'POST',
+        ...options,
+      }),
+    exportUrl: (novelId) =>
+      `${API_PREFIX}/enrichment/novels/${novelId}/export`,
   },
 };

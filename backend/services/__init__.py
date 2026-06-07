@@ -1,5 +1,15 @@
 from . import file_service, prompt_service
 from .ai_service import test_connection
+from .enrichment_service import (
+    ENRICHMENT_STEPS as _ENRICH_STEPS,
+    export_enriched_txt,
+    get_detail as get_enrichment_detail,
+    list_progress as list_enrichment_progress,
+    reset_novel as reset_enrichment_novel,
+    run_batch as run_enrichment_batch,
+    run_step as run_enrichment_step,
+    update_manual as update_enrichment_manual,
+)
 from .image_service import generate_images, upload_reference_image
 from .kg_service import (
     delete_knowledge_graph,
@@ -30,6 +40,7 @@ from .novel_service import (
     parse_chapters_fixed_size,
     preview_chapters_by_rule,
     smart_chunk_content,
+    update_chapter_info,
     update_novel_info,
     upload_novel,
 )
@@ -59,6 +70,7 @@ __all__ = [
     "get_chapter",
     "get_raw_content",
     "smart_chunk_content",
+    "update_chapter_info",
     "ParseError",
     "extract_knowledge_graph",
     "extract_knowledge_graph_streaming",
@@ -66,4 +78,11 @@ __all__ = [
     "list_knowledge_graph",
     "delete_knowledge_graph",
     "re_extract_knowledge_graph",
+    "run_enrichment_step",
+    "run_enrichment_batch",
+    "list_enrichment_progress",
+    "get_enrichment_detail",
+    "update_enrichment_manual",
+    "reset_enrichment_novel",
+    "export_enriched_txt",
 ]

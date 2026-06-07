@@ -15,6 +15,7 @@ from config import (
 )
 from schemas import (
     ChapterDetail,
+    ChapterUpdate,
     KnowledgeGraphRequest,
     KnowledgeGraphResponse,
     KnowledgeGraphValidation,
@@ -43,6 +44,7 @@ from services import (
     parse_chapters_fixed_size,
     preview_chapters_by_rule,
     re_extract_knowledge_graph,
+    update_chapter_info,
     update_novel_info,
     upload_novel,
 )
@@ -167,6 +169,31 @@ async def parse_fixed(novel_id: int, payload: ParseFixedRequest):
     "/{novel_id}/chapters/{chapter_id}", response_model=ChapterDetail
 )
 async def get_chapter_endpoint(novel_id: int, chapter_id: int):
+    chapter = await get_chapter(novel_id, chapter_id)
+    if not chapter:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    return chapter
+
+
+@router.put("/{novel_id}/chapters/{chapter_id}", response_model=ChapterDetail)
+async def update_chapter_endpoint(
+    novel_id: int, chapter_id: int, payload: ChapterUpdate
+):
+    """更新章节标题或正文(供阅读器内编辑/替换保存使用)."""
+    if payload.title is None and payload.content is None:
+        raise HTTPException(
+            status_code=400, detail="至少需要提供 title 或 content 之一"
+        )
+    ok = await update_chapter_info(
+        novel_id,
+        chapter_id,
+        title=payload.title,
+        content=payload.content,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=404, detail="章节不存在或未发生变更"
+        )
     chapter = await get_chapter(novel_id, chapter_id)
     if not chapter:
         raise HTTPException(status_code=404, detail="章节不存在")

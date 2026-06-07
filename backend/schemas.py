@@ -57,6 +57,13 @@ class ChapterDetail(ChapterOut):
     content: Optional[str] = None
 
 
+class ChapterUpdate(BaseModel):
+    """章节更新请求体,所有字段可选,仅修改传入的项."""
+
+    title: Optional[str] = Field(default=None, max_length=500)
+    content: Optional[str] = None
+
+
 class ChapterPreview(ChapterBase):
     pass
 
@@ -365,4 +372,140 @@ class ImageModelSummary(BaseModel):
     provider: str
     model_name: str
     model_url: str
+
+
+# ---------------------------------------------------------------------------
+# Novel enrichment (小说加料)
+# ---------------------------------------------------------------------------
+
+
+# 步骤名常量, 与 chapter_enrichments 表的 *_status 列一一对应
+ENRICHMENT_STEPS = ("summary", "recognition", "rewrite")
+ENRICHMENT_STEP_LABELS = {
+    "summary": "内容总结",
+    "recognition": "识别待处理",
+    "rewrite": "AI 改写",
+}
+
+
+class EnrichmentRunRequest(BaseModel):
+    """单章单步执行的请求体.
+
+    至少需要 ``model_config_id`` 用于选择 LLM; ``prompt_key`` 缺省时
+    按步骤名取内置模板 (``enrichment.summary/recognition/rewrite``).
+    """
+
+    model_config_id: int = Field(..., ge=1)
+    prompt_key: Optional[str] = Field(default=None, max_length=100)
+    override_prompt: Optional[str] = Field(default=None, max_length=20000)
+    # 仅 rewrite 步骤有效: 从「改写规则」分类下挑选的规则子模板
+    general_rule: Optional[str] = Field(default=None, max_length=20000)
+    scene_rule: Optional[str] = Field(default=None, max_length=20000)
+
+
+class EnrichmentUpdateRequest(BaseModel):
+    """手动编辑某个字段 (summary / recognition / rewrite_text)."""
+
+    summary: Optional[str] = Field(default=None, max_length=20000)
+    rewrite_text: Optional[str] = Field(default=None, max_length=200000)
+    scene_tag: Optional[str] = Field(default=None, max_length=100)
+
+
+class EnrichmentBatchRequest(BaseModel):
+    """整本批量处理请求体 (SSE 入口)."""
+
+    model_config_id: int = Field(..., ge=1)
+    steps: List[str] = Field(
+        default_factory=lambda: list(ENRICHMENT_STEPS),
+        description="要执行的步骤, 任意顺序; 默认全跑 summary+recognition+rewrite",
+    )
+    chapter_ids: Optional[List[int]] = Field(
+        default=None,
+        description="仅跑这些章节, 留空跑全部",
+    )
+    concurrency: int = Field(default=2, ge=1, le=10)
+    skip_existing: bool = Field(
+        default=True,
+        description="若为 true, 已 done 的步骤会被跳过",
+    )
+    # 仅 rewrite 步骤生效, 与单章请求体一致
+    general_rule: Optional[str] = Field(default=None, max_length=20000)
+    scene_rule: Optional[str] = Field(default=None, max_length=20000)
+
+
+class EnrichmentProgressItem(BaseModel):
+    """单章节的三态进度, 配合 chapters 表一起返回."""
+
+    chapter_id: int
+    novel_id: int
+    chapter_number: int
+    title: str
+    word_count: int
+    summary_status: str = "pending"
+    recognition_status: str = "pending"
+    rewrite_status: str = "pending"
+    status: str = "pending"
+    scene_tag: Optional[str] = None
+
+
+class EnrichmentProgressResponse(BaseModel):
+    novel_id: int
+    total: int
+    summary_done: int = 0
+    recognition_done: int = 0
+    rewrite_done: int = 0
+    summary_failed: int = 0
+    recognition_failed: int = 0
+    rewrite_failed: int = 0
+    # 1.0 = summary+recognition+rewrite 全部 done
+    overall_percent: float = 0.0
+    items: List[EnrichmentProgressItem] = []
+
+
+class EnrichmentDetailResponse(BaseModel):
+    chapter_id: int
+    novel_id: int
+    chapter_number: int
+    title: str
+    word_count: int
+    content: str = ""
+    summary: Optional[str] = None
+    summary_status: str = "pending"
+    summary_error: Optional[str] = None
+    summary_model_id: Optional[int] = None
+    recognition: Dict[str, Any] = {}
+    recognition_status: str = "pending"
+    recognition_error: Optional[str] = None
+    recognition_model_id: Optional[int] = None
+    rewrite_text: Optional[str] = None
+    rewrite_status: str = "pending"
+    rewrite_error: Optional[str] = None
+    rewrite_model_id: Optional[int] = None
+    scene_tag: Optional[str] = None
+    status: str = "pending"
+    error: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class EnrichmentRunResponse(BaseModel):
+    """单章单步执行的结果."""
+
+    success: bool
+    status: str
+    message: str
+    chapter_id: int
+    step: str
+    duration_ms: int = 0
+    model_id: Optional[int] = None
+    # 简单回传识别结果, 方便单步重跑后立刻看到
+    summary: Optional[str] = None
+    recognition: Optional[Dict[str, Any]] = None
+    rewrite_text: Optional[str] = None
+    scene_tag: Optional[str] = None
+
+
+class EnrichmentResetResponse(BaseModel):
+    novel_id: int
+    deleted: int
+    message: str = "已清空加料结果"
 

@@ -156,6 +156,35 @@ SCHEMA_STATEMENTS: List[str] = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_prompt_templates_category ON prompt_templates(category)",
+    """
+    CREATE TABLE IF NOT EXISTS chapter_enrichments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        novel_id INTEGER NOT NULL,
+        chapter_id INTEGER NOT NULL,
+        summary TEXT,
+        summary_status TEXT NOT NULL DEFAULT 'pending',
+        summary_error TEXT,
+        summary_model_id INTEGER,
+        recognition_json TEXT,
+        recognition_status TEXT NOT NULL DEFAULT 'pending',
+        recognition_error TEXT,
+        recognition_model_id INTEGER,
+        rewrite_text TEXT,
+        rewrite_status TEXT NOT NULL DEFAULT 'pending',
+        rewrite_error TEXT,
+        rewrite_model_id INTEGER,
+        scene_tag TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
+        FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE,
+        UNIQUE (chapter_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_enrichments_novel ON chapter_enrichments(novel_id)",
+    "CREATE INDEX IF NOT EXISTS idx_enrichments_status ON chapter_enrichments(status)",
 ]
 
 
@@ -519,6 +548,43 @@ async def get_chapters_by_novel(novel_id: int) -> List[Dict[str, Any]]:
             (novel_id,),
         )
         return _rows_to_dicts(await cur.fetchall())
+
+
+async def update_chapter(
+    novel_id: int,
+    chapter_id: int,
+    *,
+    title: Optional[str] = None,
+    content: Optional[str] = None,
+) -> bool:
+    """更新章节的标题/正文。
+
+    仅修改传入的字段,未传入的保持原值。编辑后内容不再回退到文件切片,
+    因此把 ``start_position`` 置 0、``end_position`` 设为新内容长度。
+    """
+    fields: List[str] = []
+    values: List[Any] = []
+    if title is not None:
+        fields.append("title = ?")
+        values.append(title)
+    if content is not None:
+        fields.append("content = ?")
+        # 同步起止位置: 编辑后的内容不再回退到文件切片
+        fields.append("start_position = 0")
+        fields.append("end_position = ?")
+        values.append(len(content))
+        values.append(len(content))
+    if not fields:
+        return False
+    values.extend([chapter_id, novel_id])
+    async with get_db() as db:
+        cur = await db.execute(
+            f"UPDATE chapters SET {', '.join(fields)} "
+            "WHERE id = ? AND novel_id = ?",
+            values,
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def get_chapter_with_file(
@@ -962,4 +1028,191 @@ async def get_kg_stats(novel_id: int) -> Dict[str, int]:
         "character_relations": cc_count,
         "event_relations": ee_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# Novel enrichment (小说加料)
+# ---------------------------------------------------------------------------
+
+
+def _decode_recognition_json(raw: Optional[str]) -> Dict[str, Any]:
+    """recognition_json 列的 JSON 解码, 兼容空/坏数据."""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _encode_recognition_json(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _row_to_enrichment(row: aiosqlite.Row) -> Dict[str, Any]:
+    data = dict(row)
+    data["recognition"] = _decode_recognition_json(data.get("recognition_json"))
+    return data
+
+
+async def upsert_enrichment(
+    *,
+    novel_id: int,
+    chapter_id: int,
+    summary: Optional[str] = None,
+    summary_status: Optional[str] = None,
+    summary_error: Optional[str] = None,
+    summary_model_id: Optional[int] = None,
+    recognition: Optional[Dict[str, Any]] = None,
+    recognition_status: Optional[str] = None,
+    recognition_error: Optional[str] = None,
+    recognition_model_id: Optional[int] = None,
+    rewrite_text: Optional[str] = None,
+    rewrite_status: Optional[str] = None,
+    rewrite_error: Optional[str] = None,
+    rewrite_model_id: Optional[int] = None,
+    scene_tag: Optional[str] = None,
+    status: Optional[str] = None,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """按需更新 chapter_enrichments 的某些字段, 缺失则保留原值.
+
+    仅在至少传入了 1 个可写字段时才执行写入. 三个步骤独立可写.
+    """
+    sets: List[str] = []
+    values: List[Any] = []
+    if summary is not None:
+        sets.append("summary = ?")
+        values.append(summary)
+    if summary_status is not None:
+        sets.append("summary_status = ?")
+        values.append(summary_status)
+    if summary_error is not None:
+        sets.append("summary_error = ?")
+        values.append(summary_error)
+    if summary_model_id is not None:
+        sets.append("summary_model_id = ?")
+        values.append(int(summary_model_id))
+    if recognition is not None:
+        sets.append("recognition_json = ?")
+        values.append(_encode_recognition_json(recognition))
+    if recognition_status is not None:
+        sets.append("recognition_status = ?")
+        values.append(recognition_status)
+    if recognition_error is not None:
+        sets.append("recognition_error = ?")
+        values.append(recognition_error)
+    if recognition_model_id is not None:
+        sets.append("recognition_model_id = ?")
+        values.append(int(recognition_model_id))
+    if rewrite_text is not None:
+        sets.append("rewrite_text = ?")
+        values.append(rewrite_text)
+    if rewrite_status is not None:
+        sets.append("rewrite_status = ?")
+        values.append(rewrite_status)
+    if rewrite_error is not None:
+        sets.append("rewrite_error = ?")
+        values.append(rewrite_error)
+    if rewrite_model_id is not None:
+        sets.append("rewrite_model_id = ?")
+        values.append(int(rewrite_model_id))
+    if scene_tag is not None:
+        sets.append("scene_tag = ?")
+        values.append(scene_tag)
+    if status is not None:
+        sets.append("status = ?")
+        values.append(status)
+    if error is not None:
+        sets.append("error = ?")
+        values.append(error)
+    if not sets:
+        row = await get_enrichment_by_chapter(chapter_id)
+        if row:
+            return row
+        return {}
+    # column_names 仅取写入列 (不含 updated_at 这种 SQL 片段)
+    column_names = [s.split(" = ")[0] for s in sets]
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "SELECT id FROM chapter_enrichments WHERE chapter_id = ?",
+            (chapter_id,),
+        )
+        row = await cur.fetchone()
+        if row:
+            await db.execute(
+                f"UPDATE chapter_enrichments SET {', '.join(sets)} "
+                "WHERE id = ?",
+                (*values, row["id"]),
+            )
+        else:
+            placeholders = ", ".join(["?"] * len(values))
+            await db.execute(
+                f"INSERT INTO chapter_enrichments "
+                f"(novel_id, chapter_id, {', '.join(column_names)}) "
+                f"VALUES (?, ?, {placeholders})",
+                (novel_id, chapter_id, *values),
+            )
+        await db.commit()
+    return await get_enrichment_by_chapter(chapter_id) or {}
+
+
+async def get_enrichment_by_chapter(chapter_id: int) -> Optional[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT * FROM chapter_enrichments WHERE chapter_id = ?
+            """,
+            (chapter_id,),
+        )
+        row = await cur.fetchone()
+        return _row_to_enrichment(row) if row else None
+
+
+async def list_enrichment_by_novel(novel_id: int) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT * FROM chapter_enrichments WHERE novel_id = ?
+            """,
+            (novel_id,),
+        )
+        rows = await cur.fetchall()
+    return [_row_to_enrichment(r) for r in rows]
+
+
+async def list_failed_chapter_ids(novel_id: int) -> List[int]:
+    """返回任意步骤失败的章节 ID, 用于「重试失败章节」按钮."""
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT chapter_id FROM chapter_enrichments
+            WHERE novel_id = ?
+              AND (
+                summary_status = 'failed'
+                OR recognition_status = 'failed'
+                OR rewrite_status = 'failed'
+              )
+            """,
+            (novel_id,),
+        )
+        rows = await cur.fetchall()
+    return [int(r["chapter_id"]) for r in rows]
+
+
+async def reset_novel_enrichments(novel_id: int) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM chapter_enrichments WHERE novel_id = ?",
+            (novel_id,),
+        )
+        await db.commit()
+    return int(cur.rowcount or 0)
 

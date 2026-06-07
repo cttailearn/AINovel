@@ -41,6 +41,21 @@ PROMPT_CATEGORIES = [
         "label": "知识图谱抽取",
         "description": "在构建人物 / 事件 / 关系知识图谱时使用的五段式提示词。",
     },
+    {
+        "key": "enrichment",
+        "label": "小说加料",
+        "description": "章节摘要、登场人物/关键事件识别、场景分类与改写规则的提示词。",
+    },
+    {
+        "key": "rewrite_general",
+        "label": "改写规则·通用",
+        "description": "改写步骤中作为「通用指导」拼接的规则子模板。",
+    },
+    {
+        "key": "rewrite_scene",
+        "label": "改写规则·场景",
+        "description": "改写步骤中按场景命中的规则子模板（如高燃战斗 / 情感爆发 / 推理悬疑）。",
+    },
 ]
 
 
@@ -421,6 +436,170 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 输出严格 JSON 数组, 元素只能是以上三种之一。""",
         "temperature": 0.2,
         "max_tokens": 2000,
+    },
+    # ---- novel enrichment ------------------------------------------------
+    {
+        "key": "enrichment.summary",
+        "category": "enrichment",
+        "name": "章节内容摘要",
+        "description": "Step 1: 单章 100~200 字内容总结, 为后续识别/改写提供上下文。",
+        "system_prompt": (
+            "你是一名中文长篇小说编辑, 擅长用简洁准确的语言概括章节内容。"
+            "请严格输出纯文本, 不要使用 Markdown / JSON / 编号 / 列表。"
+        ),
+        "user_prompt_template": """请为以下小说章节写一段【内容摘要】, 100~200 字, 覆盖以下要点:
+
+1. 本章主要发生了什么事 (主线情节)
+2. 关键人物是谁, 各自做了什么
+3. 场景在哪里 (时间/地点)
+4. 留下了什么悬念 / 转折 / 情绪
+
+章节标题: {chapter_title}
+
+章节正文:
+{chapter_text}
+
+【要求】
+- 100~200 字, 不超过 250 字
+- 第三人称, 不出现「本文/本章」等元叙述
+- 不要照抄原句, 概括即可
+- 不要使用 Markdown 或列表符号""",
+        "temperature": 0.3,
+        "max_tokens": 600,
+    },
+    {
+        "key": "enrichment.recognition",
+        "category": "enrichment",
+        "name": "登场人物 / 关键事件 / 场景识别",
+        "description": "Step 2: 抽取登场人物 + 关键事件 + 场景标签, 输出 JSON 对象。",
+        "system_prompt": (
+            "你是一名小说文本分析专家, 从章节中精确识别登场人物、关键事件与场景类型。"
+            "只输出严格 JSON 对象, 不要解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """请从以下小说章节中识别:
+1. 【登场人物】本章明确出场/有台词/有动作的角色 (不含只被提名的背景人物)
+2. 【关键事件】本章推动主线或有戏剧张力的 2~5 个事件
+3. 【场景标签】本章的主要场景类型 (1~2 个, 用简短中文标签, 如「高燃战斗场景」「情感爆发时刻」「日常铺垫」「推理悬疑」)
+
+章节标题: {chapter_title}
+
+章节正文:
+{chapter_text}
+
+【输出 JSON 格式, 不要任何其他内容】
+{{
+  "characters": [
+    {{"name": "角色名", "description": "本章内表现/状态/动作的一句话描述"}}
+  ],
+  "events": [
+    {{"name": "事件短名", "description": "事件的一句话描述"}}
+  ],
+  "scene_tag": "场景标签"
+}}""",
+        "temperature": 0.2,
+        "max_tokens": 1200,
+    },
+    {
+        "key": "enrichment.rewrite",
+        "category": "enrichment",
+        "name": "AI 改写",
+        "description": "Step 3: 结合 summary + 人物事件 + 改写规则, 重写章节正文。",
+        "system_prompt": (
+            "你是一名擅长小说加料改写的写作助手。"
+            "改写目标是: 在保留原章节主线和关键事件的前提下, 增强画面感、对话张力、动作细节与情绪渲染, "
+            "避免偏离原作设定与人设。"
+            "输出仅包含改写后的正文, 不要解释、注释、Markdown 或章节标题。"
+        ),
+        "user_prompt_template": """请改写以下章节。
+
+【章节标题】{chapter_title}
+【章节摘要】{summary}
+【登场人物 / 关键事件】{recognition_json}
+【场景标签】{scene_tag}
+
+【通用改写规则】
+{general_rule}
+
+【场景特定改写规则】
+{scene_rule}
+
+【原文】
+{chapter_text}
+
+【改写要求】
+1. 保留主要人物、事件顺序与核心设定, 不要改变主线走向
+2. 在以下方面做加料:
+   - 心理活动 / 情绪渲染 (2~3 处)
+   - 对话张力 / 动作细节 (1~2 处)
+   - 场景氛围 / 感官描写 (1~2 处)
+3. 不要生造新角色 / 新支线
+4. 字数控制在原文的 1.0~1.5 倍, 不要无限膨胀
+5. 仅输出改写后的正文, 不含章节标题 / 元注释""",
+        "temperature": 0.5,
+        "max_tokens": 4000,
+    },
+    {
+        "key": "enrichment.scene_classify",
+        "category": "enrichment",
+        "name": "场景分类",
+        "description": "可选步骤: 给定章节正文, 给出 1~2 个场景标签, 供改写时按场景选规则。",
+        "system_prompt": (
+            "你是一名小说文本分析专家, 擅长为章节打场景标签。"
+            "只输出严格 JSON 数组, 不要解释、注释或 Markdown 代码块。"
+        ),
+        "user_prompt_template": """请从下列【场景候选】中为当前章节选择 1~2 个最匹配的标签, 按匹配度从高到低排序:
+
+场景候选: 高燃战斗场景, 情感爆发时刻, 日常铺垫, 推理悬疑, 政治权谋, 轻松搞笑, 恐怖惊悚, 浪漫言情, 离别重逢, 修炼突破
+
+章节标题: {chapter_title}
+章节正文:
+{chapter_text}
+
+【输出严格 JSON 数组】""",
+        "temperature": 0.1,
+        "max_tokens": 200,
+    },
+    # ---- rewrite rules 通用 + 场景特定 默认占位 ------------------------
+    {
+        "key": "enrichment.rewrite_rule.general",
+        "category": "rewrite_general",
+        "name": "默认通用改写规则",
+        "description": "改写步骤会自动拼接本模板到 `enrichment.rewrite` 的「通用改写规则」位置。",
+        "system_prompt": "",
+        "user_prompt_template": """- 保留原章节的主要情节, 不偏离主线
+- 在保留人设的前提下增加 2~3 处心理活动 / 情绪渲染
+- 增强对话张力, 让关键对话更带感
+- 加入 1~2 处感官描写 (视 / 听 / 嗅 / 触 / 味)
+- 不创造新角色 / 新支线
+- 篇幅控制在原文 1.0~1.5 倍""",
+        "temperature": 0.4,
+        "max_tokens": 2400,
+    },
+    {
+        "key": "enrichment.rewrite_rule.scene_battle",
+        "category": "rewrite_scene",
+        "name": "高燃战斗场景改写",
+        "description": "按场景标签「高燃战斗场景」命中, 自动拼接到改写 prompt。",
+        "system_prompt": "",
+        "user_prompt_template": """- 强化动作动词, 短句切割, 提高阅读节奏
+- 增加打击感 (声音 / 震动 / 光影 / 余波)
+- 用内心独白或微表情呈现高手对决的张力
+- 招数不必换名, 但要让每次出招都有画面感""",
+        "temperature": 0.4,
+        "max_tokens": 2400,
+    },
+    {
+        "key": "enrichment.rewrite_rule.scene_emotion",
+        "category": "rewrite_scene",
+        "name": "情感爆发时刻改写",
+        "description": "按场景标签「情感爆发时刻」命中, 自动拼接到改写 prompt。",
+        "system_prompt": "",
+        "user_prompt_template": """- 强化对话节奏与潜台词, 用停顿 / 沉默传达情绪
+- 描写微表情 / 肢体语言 / 视线变化
+- 心理活动要克制, 让读者自己感受
+- 避免直白的「她很伤心」, 用细节代替""",
+        "temperature": 0.4,
+        "max_tokens": 2400,
     },
 ]
 

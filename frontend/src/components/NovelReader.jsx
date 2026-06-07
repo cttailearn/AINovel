@@ -12,6 +12,38 @@ const READING_PRESETS = [
   { name: '书籍', fontSize: 16, lineHeight: 2.2, letterSpacing: 0.5, background: '#faf8f5', color: '#2c2c2c', sidebarBg: '#f0ebe3', sidebarColor: '#2c2c2c' },
 ];
 
+// 把章节内容切成 [{type, text, matchIndex, isCurrent}] 段,
+// 供 content-text 渲染出高亮匹配. matchIndex 用于 "上一个/下一个" 跳转.
+function buildContentSegments(content, matches, currentIndex) {
+  if (!content) return [];
+  if (!matches || matches.length === 0) {
+    return [{ type: 'plain', text: content }];
+  }
+  const sorted = [...matches].sort((a, b) => a.index - b.index);
+  const segments = [];
+  let cursor = 0;
+  sorted.forEach((m, i) => {
+    if (m.index < cursor) {
+      // 重叠 / 越界, 跳过
+      return;
+    }
+    if (m.index > cursor) {
+      segments.push({ type: 'plain', text: content.slice(cursor, m.index) });
+    }
+    segments.push({
+      type: 'match',
+      text: content.slice(m.index, m.index + m.length),
+      matchIndex: i,
+      isCurrent: i === currentIndex,
+    });
+    cursor = m.index + m.length;
+  });
+  if (cursor < content.length) {
+    segments.push({ type: 'plain', text: content.slice(cursor) });
+  }
+  return segments;
+}
+
 function NovelReader({ novelId, onBack }) {
   const toast = useToast();
   const [novel, setNovel] = useState(null);
@@ -40,8 +72,19 @@ function NovelReader({ novelId, onBack }) {
   const [currentResultIndex, setCurrentResultIndex] = useState(-1);
   const [showFindPanel, setShowFindPanel] = useState(false);
 
+  // 替换/编辑后的"脏数据"状态: 用于在 find 面板显示 "保存修改" 按钮
+  const [contentDirty, setContentDirty] = useState(false);
+  // 保存请求进行中, 防重复点击
+  const [saving, setSaving] = useState(false);
+
+  // 编辑模式: 直接编辑章节标题 / 正文
+  const [editMode, setEditMode] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
+  const [editContent, setEditContent] = useState('');
+
   const abortRef = useRef(null);
   const contentScrollRef = useRef(null);
+  const highlightRefs = useRef({}); // matchIndex -> HTMLElement
   const [scrollRatio, setScrollRatio] = useState(0);
 
   useEffect(() => {
@@ -79,6 +122,10 @@ function NovelReader({ novelId, onBack }) {
     setContent('');
     setFindResults([]);
     setCurrentResultIndex(-1);
+    // 切换章节: 退出编辑模式, 丢弃未保存的本地改动
+    setEditMode(false);
+    setContentDirty(false);
+    highlightRefs.current = {};
     (async () => {
       try {
         const data = await api.novels.chapter(novelId, chapters[currentIndex].id, {
@@ -161,6 +208,7 @@ function NovelReader({ novelId, onBack }) {
       replaceText +
       content.substring(result.index + result.length);
     setContent(next);
+    setContentDirty(true);
     handleFind();
   };
 
@@ -170,6 +218,7 @@ function NovelReader({ novelId, onBack }) {
       const re = new RegExp(findText, 'g');
       const next = content.replace(re, replaceText);
       setContent(next);
+      setContentDirty(true);
       setFindResults([]);
       setCurrentResultIndex(-1);
       toast.success('已替换');
@@ -178,19 +227,127 @@ function NovelReader({ novelId, onBack }) {
     }
   };
 
+  // 把"阅读态"的修改(替换/全部替换)保存到后端
+  const handleSaveChanges = async () => {
+    const chapter = chapters[currentIndex];
+    if (!chapter) return;
+    if (!contentDirty) {
+      toast.info('没有需要保存的修改');
+      return;
+    }
+    setSaving(true);
+    try {
+      const updated = await api.novels.updateChapter(novelId, chapter.id, {
+        content,
+      });
+      setChapters((cs) =>
+        cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))
+      );
+      setContentDirty(false);
+      setFindResults([]);
+      setCurrentResultIndex(-1);
+      toast.success('已保存到服务器');
+    } catch (err) {
+      toast.error(
+        `保存失败: ${err instanceof ApiError ? err.message : err.message}`
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ===== 编辑模式 =====
+  const startEdit = () => {
+    const chapter = chapters[currentIndex];
+    if (!chapter) return;
+    setEditTitle(chapter.title || '');
+    setEditContent(content || '');
+    setEditMode(true);
+    setShowFindPanel(false);
+    setShowSettings(false);
+  };
+
+  const cancelEdit = () => {
+    if (saving) return;
+    setEditMode(false);
+  };
+
+  const saveEdit = async () => {
+    const chapter = chapters[currentIndex];
+    if (!chapter) return;
+    if (!editTitle.trim()) {
+      toast.error('章节标题不能为空');
+      return;
+    }
+    setSaving(true);
+    try {
+      const updated = await api.novels.updateChapter(novelId, chapter.id, {
+        title: editTitle.trim(),
+        content: editContent,
+      });
+      // 同步本地章节列表中的标题
+      setChapters((cs) =>
+        cs.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))
+      );
+      setContent(updated.content || '');
+      setContentDirty(false);
+      setFindResults([]);
+      setCurrentResultIndex(-1);
+      setEditMode(false);
+      toast.success('已保存');
+    } catch (err) {
+      toast.error(
+        `保存失败: ${err instanceof ApiError ? err.message : err.message}`
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const scrollToResult = (index) => {
     setCurrentResultIndex(index);
     const container = contentScrollRef.current;
     if (!container) return;
-    const result = findResults[index];
-    if (!result) return;
-    // 估算匹配位置对应的滚动偏移
-    const totalLength = content.length || 1;
-    const ratio = result.index / totalLength;
-    // 让匹配位置落在视口上部约 30% 处
-    const targetTop = container.scrollHeight * ratio - container.clientHeight * 0.3;
-    container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+    // 高亮元素渲染完后再计算位置
+    requestAnimationFrame(() => {
+      const el = highlightRefs.current[index];
+      if (!el) {
+        // 兜底: 退回到比例估算
+        const result = findResults[index];
+        if (!result) return;
+        const totalLength = content.length || 1;
+        const ratio = result.index / totalLength;
+        const targetTop =
+          container.scrollHeight * ratio - container.clientHeight * 0.3;
+        container.scrollTo({
+          top: Math.max(0, targetTop),
+          behavior: 'smooth',
+        });
+        return;
+      }
+      const elRect = el.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const offset =
+        elRect.top - containerRect.top + container.scrollTop -
+        container.clientHeight * 0.3;
+      container.scrollTo({ top: Math.max(0, offset), behavior: 'smooth' });
+    });
   };
+
+  // 用于渲染时建立 matchIndex -> HTMLElement 映射
+  const setHighlightRef = (matchIndex) => (el) => {
+    if (el) {
+      highlightRefs.current[matchIndex] = el;
+    } else {
+      delete highlightRefs.current[matchIndex];
+    }
+  };
+
+  // 渲染章节内容(支持高亮匹配)
+  const contentSegments = useMemo(
+    () => buildContentSegments(content, findResults, currentResultIndex),
+    [content, findResults, currentResultIndex]
+  );
 
   const styles = useMemo(
     () => ({
@@ -255,6 +412,17 @@ function NovelReader({ novelId, onBack }) {
           <div className="toolbar-progress-fill" style={{ width: `${Math.round(scrollRatio * 100)}%` }} />
         </div>
         <div className="toolbar-actions">
+          <button
+            className={`toolbar-btn ${editMode ? 'active' : ''}`}
+            type="button"
+            onClick={() => (editMode ? cancelEdit() : startEdit())}
+            title={editMode ? '取消编辑' : '编辑章节'}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" stroke="currentColor" strokeWidth="2" />
+              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" strokeWidth="2" />
+            </svg>
+          </button>
           <button
             className={`toolbar-btn ${showFindPanel ? 'active' : ''}`}
             type="button"
@@ -386,6 +554,19 @@ function NovelReader({ novelId, onBack }) {
               </div>
             </div>
           )}
+          {contentDirty && (
+            <div className="find-save-bar">
+              <span className="dirty-hint">⚠ 当前有未保存的替换</span>
+              <button
+                type="button"
+                className="btn btn-save"
+                onClick={handleSaveChanges}
+                disabled={saving}
+              >
+                {saving ? '保存中…' : '保存修改'}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -425,7 +606,69 @@ function NovelReader({ novelId, onBack }) {
         </div>
 
         <div className="reader-content">
-          {loadingChapter ? (
+          {editMode ? (
+            <div className="reader-edit-panel">
+              <div className="edit-panel-header">
+                <h3>编辑章节</h3>
+                <button
+                  type="button"
+                  className="edit-close-btn"
+                  onClick={cancelEdit}
+                  disabled={saving}
+                  title="关闭"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="edit-form-body">
+                <label className="edit-label">
+                  <span>章节标题</span>
+                  <input
+                    type="text"
+                    className="edit-title-input"
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    placeholder="章节标题"
+                    disabled={saving}
+                  />
+                </label>
+                <label className="edit-label">
+                  <span>正文</span>
+                  <textarea
+                    className="edit-content-textarea"
+                    value={editContent}
+                    onChange={(e) => setEditContent(e.target.value)}
+                    placeholder="章节正文"
+                    disabled={saving}
+                    rows={24}
+                  />
+                </label>
+                <div className="edit-meta">
+                  <span>
+                    字数 {editContent.replace(/\s+/g, '').length.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+              <div className="edit-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={saveEdit}
+                  disabled={saving || !editTitle.trim()}
+                >
+                  {saving ? '保存中…' : '保存'}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={cancelEdit}
+                  disabled={saving}
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          ) : loadingChapter ? (
             <div className="content-loading">
               <div className="loading-spinner large"></div>
               <p>正在展开书页…</p>
@@ -457,6 +700,12 @@ function NovelReader({ novelId, onBack }) {
                     <span>{readMinutes > 0 ? `约 ${readMinutes} 分钟阅读` : '短章'}</span>
                     <span className="meta-dot">·</span>
                     <span>{contentLength.toLocaleString()} 字</span>
+                    {contentDirty && (
+                      <>
+                        <span className="meta-dot">·</span>
+                        <span className="meta-dirty">未保存的修改</span>
+                      </>
+                    )}
                   </div>
                   <div className="content-divider" aria-hidden="true">
                     <span className="divider-ornament">❦</span>
@@ -473,7 +722,22 @@ function NovelReader({ novelId, onBack }) {
                     whiteSpace: 'pre-wrap',
                   }}
                 >
-                  {content}
+                  {contentSegments.map((seg, i) =>
+                    seg.type === 'plain' ? (
+                      // eslint-disable-next-line react/no-array-index-key
+                      <span key={`p-${i}`}>{seg.text}</span>
+                    ) : (
+                      <mark
+                        // eslint-disable-next-line react/no-array-index-key
+                        key={`m-${i}`}
+                        ref={setHighlightRef(seg.matchIndex)}
+                        data-find-index={seg.matchIndex}
+                        className={`find-match${seg.isCurrent ? ' find-match-current' : ''}`}
+                      >
+                        {seg.text}
+                      </mark>
+                    )
+                  )}
                 </div>
 
                 <footer className="content-footer">

@@ -29,5 +29,13 @@ PARSE_RULE_PREVIEW_LIMIT = 20
 
 ALLOWED_NOVEL_EXT = {".txt"}
 
+# Novel enrichment (小说加料)
+ENRICHMENT_DEFAULT_CONCURRENCY = int(
+    os.getenv("ENRICHMENT_DEFAULT_CONCURRENCY", "2")
+)
+ENRICHMENT_DEFAULT_MODEL = os.getenv("ENRICHMENT_DEFAULT_MODEL", "")
+EXPORTS_DIR = DATA_DIR / "exports"
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 NOVELS_DIR.mkdir(parents=True, exist_ok=True)
+EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
