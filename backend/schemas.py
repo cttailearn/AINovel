@@ -401,6 +401,9 @@ class EnrichmentRunRequest(BaseModel):
     # 仅 rewrite 步骤有效: 从「改写规则」分类下挑选的规则子模板
     general_rule: Optional[str] = Field(default=None, max_length=20000)
     scene_rule: Optional[str] = Field(default=None, max_length=20000)
+    # 仅 rewrite 步骤有效: 用户在加料工坊中填写的「加料需求描述」.
+    # 拼入 enrichment.rewrite 模板的 {enrichment_intent} 变量.
+    enrichment_intent: Optional[str] = Field(default=None, max_length=4000)
 
 
 class EnrichmentUpdateRequest(BaseModel):
@@ -409,6 +412,10 @@ class EnrichmentUpdateRequest(BaseModel):
     summary: Optional[str] = Field(default=None, max_length=20000)
     rewrite_text: Optional[str] = Field(default=None, max_length=200000)
     scene_tag: Optional[str] = Field(default=None, max_length=100)
+    # 允许直接覆写 recognition (人物 / 事件), 即用户修正 AI 抽取结果
+    recognition: Optional[Dict[str, Any]] = Field(default=None)
+    # 允许单独覆写 intent (加料需求描述)
+    enrichment_intent: Optional[str] = Field(default=None, max_length=4000)
 
 
 class EnrichmentBatchRequest(BaseModel):
@@ -482,9 +489,16 @@ class EnrichmentDetailResponse(BaseModel):
     rewrite_error: Optional[str] = None
     rewrite_model_id: Optional[int] = None
     scene_tag: Optional[str] = None
+    enrichment_intent: Optional[str] = None
     status: str = "pending"
     error: Optional[str] = None
     updated_at: Optional[str] = None
+    # v0.2 增量: 当前是否已应用, 已应用的 suggestion id 与时间
+    has_applied: bool = False
+    applied_suggestion_id: Optional[int] = None
+    applied_at: Optional[str] = None
+    # 当前章节 content 是否来自某次应用 (回滚需要) — 1=yes / 0=no
+    content_is_enriched: bool = False
 
 
 class EnrichmentRunResponse(BaseModel):
@@ -508,4 +522,96 @@ class EnrichmentResetResponse(BaseModel):
     novel_id: int
     deleted: int
     message: str = "已清空加料结果"
+
+
+# ---------------------------------------------------------------------------
+# 加料应用 (apply / revert / history / diff)  v0.2
+# ---------------------------------------------------------------------------
+
+
+class DiffSegment(BaseModel):
+    """一段 diff 结果.
+
+    * ``type = 'unchanged'``  原文与改写一致, 正常显示
+    * ``type = 'added'``      改写新增的内容, 绿色高亮
+    * ``type = 'removed'``    原文被改写替换掉的内容, 红色删除线
+    """
+
+    type: Literal["unchanged", "added", "removed"]
+    text: str
+
+
+class DiffResponse(BaseModel):
+    chapter_id: int
+    novel_id: int
+    original_length: int
+    rewrite_length: int
+    added_length: int
+    removed_length: int
+    segments: List[DiffSegment]
+    truncated: bool = False
+
+
+class ApplyRequest(BaseModel):
+    """把当前章节的 rewrite_text 应用到 chapters.content.
+
+    body 可省略, 默认使用 chapter_enrichments.rewrite_text.
+    """
+
+    rewrite_text: Optional[str] = Field(default=None, max_length=200000)
+    # 应用时携带的「加料需求」, 写入 enrichment_suggestions 留痕
+    enrichment_intent: Optional[str] = Field(default=None, max_length=4000)
+
+
+class ApplyResponse(BaseModel):
+    success: bool
+    message: str
+    chapter_id: int
+    suggestion_id: int
+    applied_at: str
+    original_length: int
+    rewrite_length: int
+    added_length: int
+    removed_length: int
+    enrichment_intent: Optional[str] = None
+
+
+class RevertRequest(BaseModel):
+    """回滚到指定的 suggestion."""
+
+    target_suggestion_id: Optional[int] = Field(
+        default=None,
+        description="回滚到该条 suggestion (变 applied). 留空则回滚到上一次 superseded 的版本.",
+    )
+
+
+class RevertResponse(BaseModel):
+    success: bool
+    message: str
+    chapter_id: int
+    reverted_suggestion_id: int
+    new_applied_suggestion_id: int
+    new_content_length: int
+
+
+class SuggestionOut(BaseModel):
+    id: int
+    chapter_id: int
+    novel_id: int
+    enrichment_id: Optional[int] = None
+    model_id: Optional[int] = None
+    scene_tag: Optional[str] = None
+    status: str
+    applied_at: Optional[str] = None
+    reverted_at: Optional[str] = None
+    original_length: int
+    rewrite_length: int
+    added_length: int
+    removed_length: int
+
+
+class HistoryResponse(BaseModel):
+    chapter_id: int
+    novel_id: int
+    items: List[SuggestionOut]
 

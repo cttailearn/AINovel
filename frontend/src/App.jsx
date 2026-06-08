@@ -4,9 +4,9 @@ import { useToast } from './components/Toast/ToastProvider.jsx';
 import { ModelConfigPanel } from './components/ModelConfigPanel.jsx';
 import { PromptManagerPanel } from './components/PromptManagerPanel.jsx';
 import { Workbench } from './components/Workbench.jsx';
-import { KnowledgeGraphPage } from './components/KnowledgeGraphPage.jsx';
 import { ImageGenerationPage } from './components/ImageGenerationPage.jsx';
-import { EnrichmentPage } from './components/EnrichmentPage.jsx';
+import { EnrichmentTaskBanner } from './components/EnrichmentTaskBanner.jsx';
+import { EnrichmentTaskProvider, useEnrichmentTask } from './state/EnrichmentTaskContext.jsx';
 import { useTheme } from './ThemeContext.jsx';
 import './App.css';
 
@@ -61,25 +61,11 @@ function BackendStatus({ refreshAll }) {
 const NAV_ITEMS = [
   {
     key: 'workbench',
-    title: '工作台',
+    title: '我的项目',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
         <path d="M3 7l9-4 9 4-9 4-9-4z" stroke="currentColor" strokeLinejoin="round" />
         <path d="M3 12l9 4 9-4M3 17l9 4 9-4" stroke="currentColor" strokeLinejoin="round" />
-      </svg>
-    ),
-  },
-  {
-    key: 'knowledge',
-    title: '知识图谱',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
-        <circle cx="12" cy="12" r="3" stroke="currentColor" />
-        <circle cx="4" cy="6" r="2" stroke="currentColor" />
-        <circle cx="20" cy="6" r="2" stroke="currentColor" />
-        <circle cx="4" cy="18" r="2" stroke="currentColor" />
-        <circle cx="20" cy="18" r="2" stroke="currentColor" />
-        <path d="M6 6l4 4M18 6l-4 4M6 18l4-4M18 18l-4-4" stroke="currentColor" />
       </svg>
     ),
   },
@@ -91,17 +77,6 @@ const NAV_ITEMS = [
         <rect x="3" y="4" width="18" height="16" rx="3" stroke="currentColor" />
         <circle cx="8.5" cy="9.5" r="1.5" stroke="currentColor" />
         <path d="M21 16l-5-5-7 7" stroke="currentColor" strokeLinejoin="round" />
-      </svg>
-    ),
-  },
-  {
-    key: 'enrichment',
-    title: '加料工作台',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
-        <path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="currentColor" strokeLinecap="round" />
-        <circle cx="12" cy="12" r="4" stroke="currentColor" />
-        <path d="M9 12h.01M12 12h.01M15 12h.01" stroke="currentColor" strokeLinecap="round" />
       </svg>
     ),
   },
@@ -123,16 +98,23 @@ const NAV_ITEMS = [
 ];
 
 const PAGE_META = {
-  workbench: { title: '我的项目', sub: '管理并解析你的小说项目' },
-  knowledge: { title: '知识图谱', sub: '查看人物、事件与关系' },
+  workbench: { title: '我的项目', sub: '管理、解析、阅读、加料、知识图谱 — 一站式工作台' },
   image: { title: '图像生成', sub: '文生图 / 图生图，多模型、多风格' },
-  enrichment: { title: '小说加料', sub: 'AI 摘要、识别与改写，按章节流水线处理' },
   settings: { title: '系统设置', sub: '配置模型与提示词' },
 };
 
 export default function App() {
+  return (
+    <EnrichmentTaskProvider>
+      <AppShell />
+    </EnrichmentTaskProvider>
+  );
+}
+
+function AppShell() {
   const { theme, toggleTheme } = useTheme();
   const toast = useToast();
+  const { reset: resetEnrichmentTask } = useEnrichmentTask();
   const [activeNav, setActiveNav] = useState('workbench');
   const [settingsTab, setSettingsTab] = useState('models');
   const [models, setModels] = useState([]);
@@ -242,13 +224,9 @@ export default function App() {
               placeholder={
                 activeNav === 'workbench'
                   ? '搜索项目标题、作者或内容...'
-                  : activeNav === 'knowledge'
-                    ? '搜索小说标题或作者...'
-                    : activeNav === 'image'
-                      ? '搜索结果...'
-                      : activeNav === 'enrichment'
-                        ? '搜索加料工作台中的小说...'
-                        : '在设置中搜索...'
+                  : activeNav === 'image'
+                    ? '搜索结果...'
+                    : '搜索...'
               }
               value={topSearch}
               onChange={(e) => setTopSearch(e.target.value)}
@@ -256,6 +234,12 @@ export default function App() {
           </div>
 
           <div className="rail-topbar-actions">
+            <EnrichmentTaskBanner
+              onJumpToWorkbench={() => {
+                resetEnrichmentTask();
+                setActiveNav('workbench');
+              }}
+            />
             <button
               type="button"
               className="rail-topbar-icon-btn"
@@ -273,13 +257,16 @@ export default function App() {
 
         <section className="rail-body">
           {activeNav === 'workbench' ? (
-            <Workbench models={models} topSearch={topSearch} />
-          ) : activeNav === 'knowledge' ? (
-            <KnowledgeGraphPage models={models} topSearch={topSearch} />
+            <Workbench
+              models={models}
+              topSearch={topSearch}
+              onGoToSettings={() => {
+                setSettingsTab('models');
+                setActiveNav('settings');
+              }}
+            />
           ) : activeNav === 'image' ? (
             <ImageGenerationPage models={models} topSearch={topSearch} />
-          ) : activeNav === 'enrichment' ? (
-            <EnrichmentPage models={models} topSearch={topSearch} />
           ) : modelsLoading ? (
             <div className="loading-block">
               <div className="loading-spinner large"></div>

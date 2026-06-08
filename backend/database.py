@@ -174,6 +174,7 @@ SCHEMA_STATEMENTS: List[str] = [
         rewrite_error TEXT,
         rewrite_model_id INTEGER,
         scene_tag TEXT,
+        enrichment_intent TEXT,
         status TEXT NOT NULL DEFAULT 'pending',
         error TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -185,6 +186,29 @@ SCHEMA_STATEMENTS: List[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_enrichments_novel ON chapter_enrichments(novel_id)",
     "CREATE INDEX IF NOT EXISTS idx_enrichments_status ON chapter_enrichments(status)",
+    """
+    CREATE TABLE IF NOT EXISTS enrichment_suggestions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chapter_id INTEGER NOT NULL,
+        novel_id INTEGER NOT NULL,
+        enrichment_id INTEGER,
+        original_snapshot TEXT NOT NULL,
+        rewrite_text TEXT NOT NULL,
+        model_id INTEGER,
+        summary_snapshot TEXT,
+        recognition_snapshot TEXT,
+        scene_tag TEXT,
+        enrichment_intent TEXT,
+        status TEXT NOT NULL DEFAULT 'applied',
+        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        reverted_at TIMESTAMP,
+        FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE,
+        FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
+        FOREIGN KEY (enrichment_id) REFERENCES chapter_enrichments(id) ON DELETE SET NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_suggestions_chapter ON enrichment_suggestions(chapter_id)",
+    "CREATE INDEX IF NOT EXISTS idx_suggestions_status ON enrichment_suggestions(status)",
 ]
 
 
@@ -248,6 +272,26 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
         if cols and "extras" not in cols:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN extras TEXT")
             logger.info("Migration: added %s.extras column", table)
+
+    # v0.2.1: enrichment_suggestions 加 enrichment_intent 列 (升级加料工坊后)
+    sug_columns = await _get_table_columns(db, "enrichment_suggestions")
+    if sug_columns and "enrichment_intent" not in sug_columns:
+        await db.execute(
+            "ALTER TABLE enrichment_suggestions ADD COLUMN enrichment_intent TEXT"
+        )
+        logger.info(
+            "Migration: added enrichment_suggestions.enrichment_intent column"
+        )
+
+    # v0.2.1: chapter_enrichments 加 enrichment_intent 列 (持久化用户的加料需求)
+    ce_columns = await _get_table_columns(db, "chapter_enrichments")
+    if ce_columns and "enrichment_intent" not in ce_columns:
+        await db.execute(
+            "ALTER TABLE chapter_enrichments ADD COLUMN enrichment_intent TEXT"
+        )
+        logger.info(
+            "Migration: added chapter_enrichments.enrichment_intent column"
+        )
 
 
 @asynccontextmanager
@@ -1077,6 +1121,7 @@ async def upsert_enrichment(
     rewrite_error: Optional[str] = None,
     rewrite_model_id: Optional[int] = None,
     scene_tag: Optional[str] = None,
+    enrichment_intent: Optional[str] = None,
     status: Optional[str] = None,
     error: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1125,6 +1170,9 @@ async def upsert_enrichment(
     if scene_tag is not None:
         sets.append("scene_tag = ?")
         values.append(scene_tag)
+    if enrichment_intent is not None:
+        sets.append("enrichment_intent = ?")
+        values.append(enrichment_intent)
     if status is not None:
         sets.append("status = ?")
         values.append(status)
@@ -1211,6 +1259,142 @@ async def reset_novel_enrichments(novel_id: int) -> int:
     async with get_db() as db:
         cur = await db.execute(
             "DELETE FROM chapter_enrichments WHERE novel_id = ?",
+            (novel_id,),
+        )
+        await db.commit()
+    return int(cur.rowcount or 0)
+
+
+# ---------------------------------------------------------------------------
+# enrichment_suggestions CRUD
+# ---------------------------------------------------------------------------
+
+
+async def insert_suggestion(
+    *,
+    chapter_id: int,
+    novel_id: int,
+    original_snapshot: str,
+    rewrite_text: str,
+    enrichment_id: Optional[int] = None,
+    model_id: Optional[int] = None,
+    summary_snapshot: Optional[str] = None,
+    recognition_snapshot: Optional[str] = None,
+    scene_tag: Optional[str] = None,
+    enrichment_intent: Optional[str] = None,
+    status: str = "applied",
+) -> int:
+    """新增一条加料应用记录.
+
+    业务规则: 同时把同 chapter 当前的 applied 改为 superseded, 保留历史链.
+    """
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        await db.execute(
+            """
+            UPDATE enrichment_suggestions
+            SET status = 'superseded'
+            WHERE chapter_id = ? AND status = 'applied'
+            """,
+            (chapter_id,),
+        )
+        cur = await db.execute(
+            """
+            INSERT INTO enrichment_suggestions
+                (chapter_id, novel_id, enrichment_id, original_snapshot,
+                 rewrite_text, model_id, summary_snapshot, recognition_snapshot,
+                 scene_tag, enrichment_intent, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chapter_id,
+                novel_id,
+                enrichment_id,
+                original_snapshot,
+                rewrite_text,
+                model_id,
+                summary_snapshot,
+                recognition_snapshot,
+                scene_tag,
+                enrichment_intent,
+                status,
+            ),
+        )
+        await db.commit()
+        return int(cur.lastrowid or 0)
+
+
+async def list_suggestions_by_chapter(chapter_id: int) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT * FROM enrichment_suggestions
+            WHERE chapter_id = ?
+            ORDER BY applied_at DESC, id DESC
+            """,
+            (chapter_id,),
+        )
+        return _rows_to_dicts(await cur.fetchall())
+
+
+async def get_suggestion(suggestion_id: int) -> Optional[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM enrichment_suggestions WHERE id = ?",
+            (suggestion_id,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def get_latest_applied_suggestion(
+    chapter_id: int,
+) -> Optional[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT * FROM enrichment_suggestions
+            WHERE chapter_id = ? AND status = 'applied'
+            ORDER BY applied_at DESC, id DESC
+            LIMIT 1
+            """,
+            (chapter_id,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def mark_suggestion_status(
+    suggestion_id: int, status: str
+) -> bool:
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE enrichment_suggestions SET status = ? WHERE id = ?",
+            (status, suggestion_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def touch_suggestion_applied(suggestion_id: int) -> bool:
+    """把指定 suggestion 重新标记为 applied (用于回滚恢复)."""
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            UPDATE enrichment_suggestions
+            SET status = 'applied', applied_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (suggestion_id,),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def delete_suggestions_by_novel(novel_id: int) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM enrichment_suggestions WHERE novel_id = ?",
             (novel_id,),
         )
         await db.commit()

@@ -5,6 +5,27 @@ import { useToast } from './Toast/ToastProvider.jsx';
 
 const VARIABLE_TOKENS = ['{chunk_text}', '{character_list_json}', '{event_list_json}'];
 
+// 不同分类下可用的变量占位符. 编辑 prompt 时, 点按钮一键追加到末尾.
+const VARIABLES_BY_CATEGORY = {
+  connection: ['{prompt}'],
+  kg: ['{chunk_text}', '{character_list_json}', '{event_list_json}', '{participation_list_json}', '{existing_list_json}', '{missing_json}', '{a_json}', '{b_json}', '{evidence}'],
+  enrichment: [
+    '{chapter_title}',
+    '{chapter_text}',
+    '{summary}',
+    '{recognition_json}',
+    '{scene_tag}',
+    '{general_rule}',
+    '{scene_rule}',
+  ],
+  rewrite_general: ['{chapter_title}', '{chapter_text}', '{summary}', '{recognition_json}', '{scene_tag}'],
+  rewrite_scene: ['{chapter_title}', '{chapter_text}', '{summary}', '{recognition_json}', '{scene_tag}'],
+};
+
+function pickVariablesForCategory(category) {
+  return VARIABLES_BY_CATEGORY[category] || VARIABLE_TOKENS;
+}
+
 function summarize(text, limit = 80) {
   if (!text) return '（空）';
   const single = text.replace(/\s+/g, ' ').trim();
@@ -14,10 +35,17 @@ function summarize(text, limit = 80) {
 
 function PromptListItem({ prompt, selected, onSelect, onToggle }) {
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       className={`library-item ${selected ? 'selected' : ''} ${prompt.is_enabled ? '' : 'disabled'}`}
       onClick={() => onSelect(prompt.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect(prompt.id);
+        }
+      }}
     >
       <div className="library-item-head">
         <h4 className="library-item-name" title={prompt.name}>
@@ -46,7 +74,7 @@ function PromptListItem({ prompt, selected, onSelect, onToggle }) {
           <span className="toggle-indicator"></span>
         </button>
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -90,6 +118,7 @@ function PromptEditor({ prompt, dirty, onChange, onSave, onReset, saving, resett
 
   const saveable =
     form.name.trim().length > 0 && form.user_prompt_template.length > 0;
+  const variableTokens = pickVariablesForCategory(prompt.category);
 
   return (
     <div className="prompt-editor">
@@ -164,7 +193,7 @@ function PromptEditor({ prompt, dirty, onChange, onSave, onReset, saving, resett
           <label>User Prompt 模板 *</label>
           <div className="variable-insert">
             <span className="variable-hint">插入变量</span>
-            {VARIABLE_TOKENS.map((tok) => (
+            {variableTokens.map((tok) => (
               <button
                 key={tok}
                 type="button"

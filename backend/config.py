@@ -7,8 +7,10 @@ DATA_DIR = BASE_DIR / "data"
 NOVELS_DIR = DATA_DIR / "novels"
 DATABASE_PATH = DATA_DIR / "models.db"
 
-API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8008"))
+# 后端服务固定绑定 127.0.0.1:8008 — 这是硬编码,与桌面壳 (Tauri) 和 Vite proxy
+# (frontend/vite.config.js) 中所有调用约定一致。不要改成 env 变量或换端口,否则前端将无法定位。
+API_HOST = "127.0.0.1"
+API_PORT = 8008
 
 CORS_ORIGINS: List[str] = [
     o.strip()

@@ -2,6 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../api/client.js';
 import { tryCompileRegex } from '../utils/regex.js';
 import { useToast } from './Toast/ToastProvider.jsx';
+import { EnrichmentSidePanel } from './enrichment/EnrichmentSidePanel.jsx';
+import { SuggestionHistoryModal } from './enrichment/SuggestionHistoryModal.jsx';
+import { MergedReader } from './enrichment/MergedReader.jsx';
+import { SideBySideReader } from './enrichment/SideBySideReader.jsx';
+import { HighlightedReader } from './enrichment/HighlightedReader.jsx';
 import '../App.css';
 
 const READING_PRESETS = [
@@ -44,7 +49,7 @@ function buildContentSegments(content, matches, currentIndex) {
   return segments;
 }
 
-function NovelReader({ novelId, onBack }) {
+function NovelReader({ novelId, onBack, models: externalModels, onGoToWorkbench }) {
   const toast = useToast();
   const [novel, setNovel] = useState(null);
   const [chapters, setChapters] = useState([]);
@@ -53,6 +58,26 @@ function NovelReader({ novelId, onBack }) {
   const [loading, setLoading] = useState(true);
   const [loadingChapter, setLoadingChapter] = useState(false);
   const [error, setError] = useState(null);
+  // v0.2: 加料信息仅供侧边面板展示; 不再切换 chapters.content 来源
+  const [enrichmentMap, setEnrichmentMap] = useState({}); // chapterId -> enrichment detail
+  // v0.2: 侧边 AI 加料面板
+  const [showEnrichmentPanel, setShowEnrichmentPanel] = useState(false);
+  // v0.2.1: 阅读器内显示模式 ('original' | 'merged' | 'sidebyside' | 'highlight')
+  // - original: 纯 chapters.content
+  // - merged: 段落级合并阅读 (原文+改写交替)
+  // - sidebyside: 并排对比
+  // - highlight: 字符级 diff 高亮叠加
+  const [displayMode, setDisplayMode] = useState('original');
+  const [previewSegments, setPreviewSegments] = useState(null);
+  const [previewTruncated, setPreviewTruncated] = useState(false);
+  const [selfModels, setSelfModels] = useState([]);
+  const [selectedModelId, setSelectedModelId] = useState(null);
+  const [showHistoryFor, setShowHistoryFor] = useState(null);
+  const effectiveModels =
+    externalModels && externalModels.length > 0 ? externalModels : selfModels;
+  const enabledChatModels = (effectiveModels || []).filter(
+    (m) => (m.capability || 'chat') === 'chat' && m.enabled
+  );
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -99,6 +124,9 @@ function NovelReader({ novelId, onBack }) {
         setNovel(data);
         setChapters(data.chapters || []);
         setCurrentIndex(0);
+        // 切换小说时, 关闭高亮预览
+        setPreviewSegments(null);
+        setPreviewTruncated(false);
       } catch (err) {
         if (err.name === 'AbortError') return;
         setError(err instanceof ApiError ? err.message : '加载失败');
@@ -108,6 +136,34 @@ function NovelReader({ novelId, onBack }) {
     })();
     return () => controller.abort();
   }, [novelId]);
+
+  // 拉模型 (仅当外部未传时)
+  useEffect(() => {
+    if (externalModels && externalModels.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.models.list();
+        if (!cancelled) {
+          setSelfModels(data.configs || []);
+        }
+      } catch {
+        // 静默
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [externalModels]);
+
+  // 默认选中第一个 enabled chat 模型
+  useEffect(() => {
+    if (selectedModelId) {
+      const still = enabledChatModels.some((m) => m.id === selectedModelId);
+      if (still) return;
+    }
+    setSelectedModelId(enabledChatModels[0]?.id || null);
+  }, [enabledChatModels, selectedModelId]);
 
   useEffect(() => {
     if (chapters.length === 0) return;
@@ -126,6 +182,10 @@ function NovelReader({ novelId, onBack }) {
     setEditMode(false);
     setContentDirty(false);
     highlightRefs.current = {};
+    // 切换章节时切回原始视图, 并清掉高亮 preview
+    setDisplayMode('original');
+    setPreviewSegments(null);
+    setPreviewTruncated(false);
     (async () => {
       try {
         const data = await api.novels.chapter(novelId, chapters[currentIndex].id, {
@@ -143,11 +203,61 @@ function NovelReader({ novelId, onBack }) {
     return () => controller.abort();
   }, [currentIndex, chapters, novelId]);
 
+  // 拉取所有章节的加料详情(用于「加料版」切换),尽量轻量
+  useEffect(() => {
+    if (chapters.length === 0) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    (async () => {
+      // 用 listProgress 一次拿到整本的进度与每章的 rewrite 状态
+      try {
+        const data = await api.enrichment.listProgress(novelId, { signal: controller.signal });
+        if (cancelled || !data?.items) return;
+        // 同时按需拉取每个章节的加料详情
+        const items = data.items;
+        const needDetail = items.filter(
+          (it) => it.rewrite_status === 'done' && !enrichmentMap[it.chapter_id]
+        );
+        if (needDetail.length === 0) return;
+        await Promise.all(
+          needDetail.map(async (it) => {
+            try {
+              const detail = await api.enrichment.getDetail(it.chapter_id, {
+                signal: controller.signal,
+              });
+              if (cancelled) return;
+              setEnrichmentMap((prev) => ({ ...prev, [it.chapter_id]: detail }));
+            } catch {
+              // 单章失败不影响其它
+            }
+          })
+        );
+      } catch {
+        // 后端未启用或暂无数据 — 静默忽略
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+    // 仅在 chapters/novelId 变化时重新拉
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [novelId, chapters.length]);
+
   useEffect(() => {
     const onKey = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       // 优先关闭打开的面板，再退到关闭阅读器
       if (e.key === 'Escape') {
+        if (displayMode !== 'original') {
+          setDisplayMode('original');
+          setPreviewSegments(null);
+          return;
+        }
+        if (showEnrichmentPanel) {
+          setShowEnrichmentPanel(false);
+          return;
+        }
         if (showFindPanel) {
           setShowFindPanel(false);
           return;
@@ -164,7 +274,7 @@ function NovelReader({ novelId, onBack }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [chapters.length, onBack, showFindPanel, showSettings]);
+  }, [chapters.length, onBack, showFindPanel, showSettings, showEnrichmentPanel, displayMode]);
 
   const handlePresetChange = (index) => {
     const preset = READING_PRESETS[index];
@@ -192,7 +302,7 @@ function NovelReader({ novelId, onBack }) {
     const re = new RegExp(findText, 'gi');
     const matches = [];
     let m;
-    while ((m = re.exec(content)) !== null) {
+    while ((m = re.exec(currentContent)) !== null) {
       matches.push({ index: m.index, length: m[0].length, text: m[0] });
     }
     setFindResults(matches);
@@ -343,11 +453,34 @@ function NovelReader({ novelId, onBack }) {
     }
   };
 
-  // 渲染章节内容(支持高亮匹配)
-  const contentSegments = useMemo(
-    () => buildContentSegments(content, findResults, currentResultIndex),
-    [content, findResults, currentResultIndex]
-  );
+  // 当前章节的加料版本(若有): v0.2 不再直接替换正文, 仅用于侧边面板展示
+  const currentEnrichment = useMemo(() => {
+    const ch = chapters[currentIndex];
+    if (!ch) return null;
+    return enrichmentMap[ch.id] || null;
+  }, [chapters, currentIndex, enrichmentMap]);
+
+  const currentContent = useMemo(() => {
+    // v0.2: 正文始终来自 chapters.content; 加料由用户在侧栏一键应用
+    return content;
+  }, [content]);
+
+  // 当处于"高亮预览"模式时, 正文以 diff segments 渲染
+  const contentSegments = useMemo(() => {
+    if (displayMode === 'highlight' && previewSegments && previewSegments.length > 0) {
+      // 把 diff 段切成 [{type, text, isCurrent}]; 不做查找高亮叠加
+      return previewSegments.map((s, i) => ({
+        type: s.type === 'added' || s.type === 'removed' ? s.type : 'plain',
+        text: s.text,
+        // 保留 isCurrent 用于查找高亮 (未使用)
+        isCurrent: false,
+        matchIndex: -1,
+        // 区分 added/removed/unchanged 渲染样式
+        diffType: s.type,
+      }));
+    }
+    return buildContentSegments(currentContent, findResults, currentResultIndex);
+  }, [displayMode, previewSegments, currentContent, findResults, currentResultIndex]);
 
   const styles = useMemo(
     () => ({
@@ -364,10 +497,10 @@ function NovelReader({ novelId, onBack }) {
 
   // 章节字数与预估阅读时长（中文按 400 字/分钟）
   const contentLength = useMemo(() => {
-    if (!content) return 0;
+    if (!currentContent) return 0;
     // 去除空白字符后按字符数统计
-    return content.replace(/\s+/g, '').length;
-  }, [content]);
+    return currentContent.replace(/\s+/g, '').length;
+  }, [currentContent]);
 
   const readMinutes = useMemo(() => {
     if (!contentLength) return 0;
@@ -412,6 +545,29 @@ function NovelReader({ novelId, onBack }) {
           <div className="toolbar-progress-fill" style={{ width: `${Math.round(scrollRatio * 100)}%` }} />
         </div>
         <div className="toolbar-actions">
+          <button
+            className={`toolbar-btn ${showEnrichmentPanel ? 'active' : ''}`}
+            type="button"
+            onClick={() => setShowEnrichmentPanel((v) => !v)}
+            title="AI 加料"
+            aria-pressed={showEnrichmentPanel}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M12 2l2.39 4.84L19.5 7.5l-3.6 3.78L17 16.5l-5-2.55L7 16.5l1.1-5.22L4.5 7.5l5.11-.66L12 2z"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M5 19h14M5 22h10"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+            AI 加料
+          </button>
           <button
             className={`toolbar-btn ${editMode ? 'active' : ''}`}
             type="button"
@@ -697,6 +853,23 @@ function NovelReader({ novelId, onBack }) {
                     {chapters[currentIndex]?.title || '无题'}
                   </h1>
                   <div className="content-meta">
+                    {displayMode === 'highlight' && (
+                      <span className="meta-enriched-badge">高亮 diff 模式</span>
+                    )}
+                    {displayMode === 'merged' && (
+                      <span className="meta-enriched-badge">合并阅读模式</span>
+                    )}
+                    {displayMode === 'sidebyside' && (
+                      <span className="meta-enriched-badge">并排对比模式</span>
+                    )}
+                    {currentEnrichment?.has_applied && displayMode === 'original' && (
+                      <span className="meta-enriched-badge">已应用 AI 加料</span>
+                    )}
+                    {currentEnrichment?.rewrite_status === 'done' &&
+                      !currentEnrichment?.has_applied &&
+                      displayMode === 'original' && (
+                        <span className="meta-enriched-hint">该章有待应用的加料</span>
+                      )}
                     <span>{readMinutes > 0 ? `约 ${readMinutes} 分钟阅读` : '短章'}</span>
                     <span className="meta-dot">·</span>
                     <span>{contentLength.toLocaleString()} 字</span>
@@ -712,33 +885,105 @@ function NovelReader({ novelId, onBack }) {
                   </div>
                 </header>
 
-                <div
-                  className="content-text"
-                  style={{
-                    fontSize: `${fontSize}px`,
-                    lineHeight,
-                    letterSpacing: `${letterSpacing}px`,
-                    color: textColor,
-                    whiteSpace: 'pre-wrap',
-                  }}
-                >
-                  {contentSegments.map((seg, i) =>
-                    seg.type === 'plain' ? (
-                      // eslint-disable-next-line react/no-array-index-key
-                      <span key={`p-${i}`}>{seg.text}</span>
-                    ) : (
-                      <mark
-                        // eslint-disable-next-line react/no-array-index-key
-                        key={`m-${i}`}
-                        ref={setHighlightRef(seg.matchIndex)}
-                        data-find-index={seg.matchIndex}
-                        className={`find-match${seg.isCurrent ? ' find-match-current' : ''}`}
+                {/* 阅读器内"显示模式"工具条 (仅在有加料时显示) */}
+                {currentEnrichment?.rewrite_status === 'done' && currentEnrichment?.rewrite_text && (
+                  <div className="content-display-modes">
+                    {[
+                      { k: 'original', label: '仅原文' },
+                      { k: 'merged', label: '合并阅读' },
+                      { k: 'sidebyside', label: '并排对比' },
+                      { k: 'highlight', label: '高亮 diff' },
+                    ].map((m) => (
+                      <button
+                        key={m.k}
+                        type="button"
+                        className={`content-display-mode-btn ${
+                          displayMode === m.k ? 'active' : ''
+                        }`}
+                        onClick={async () => {
+                          if (m.k === 'highlight' && !previewSegments) {
+                            // 第一次切到 highlight 时主动拉 diff
+                            try {
+                              const data = await api.enrichment.diff(chapter.id);
+                              setPreviewSegments(data.segments);
+                              setPreviewTruncated(data.truncated);
+                            } catch (err) {
+                              toast.error(
+                                err instanceof ApiError ? err.message : '加载 diff 失败'
+                              );
+                              return;
+                            }
+                          }
+                          setDisplayMode(m.k);
+                        }}
                       >
-                        {seg.text}
-                      </mark>
-                    )
-                  )}
-                </div>
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* 正文区: 4 种模式分支 */}
+                {(displayMode === 'original' || displayMode === 'highlight') && (
+                  <div
+                    className={`content-text ${displayMode === 'highlight' ? 'diff-mode' : ''}`}
+                    style={{
+                      fontSize: `${fontSize}px`,
+                      lineHeight,
+                      letterSpacing: `${letterSpacing}px`,
+                      color: textColor,
+                      whiteSpace: 'pre-wrap',
+                    }}
+                  >
+                    {contentSegments.map((seg, i) => {
+                      if (displayMode === 'highlight' && seg.diffType) {
+                        if (seg.diffType === 'added') {
+                          // eslint-disable-next-line react/no-array-index-key
+                          return <ins key={`d-${i}`} className="reader-diff-added">{seg.text}</ins>;
+                        }
+                        if (seg.diffType === 'removed') {
+                          // eslint-disable-next-line react/no-array-index-key
+                          return <del key={`d-${i}`} className="reader-diff-removed">{seg.text}</del>;
+                        }
+                        // eslint-disable-next-line react/no-array-index-key
+                        return <span key={`d-${i}`}>{seg.text}</span>;
+                      }
+                      if (seg.type === 'plain') {
+                        // eslint-disable-next-line react/no-array-index-key
+                        return <span key={`p-${i}`}>{seg.text}</span>;
+                      }
+                      return (
+                        <mark
+                          // eslint-disable-next-line react/no-array-index-key
+                          key={`m-${i}`}
+                          ref={setHighlightRef(seg.matchIndex)}
+                          data-find-index={seg.matchIndex}
+                          className={`find-match${seg.isCurrent ? ' find-match-current' : ''}`}
+                        >
+                          {seg.text}
+                        </mark>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {displayMode === 'merged' && (
+                  <div className="content-merged-wrap">
+                    <MergedReader
+                      original={currentContent || ''}
+                      rewrite={currentEnrichment?.rewrite_text || ''}
+                    />
+                  </div>
+                )}
+
+                {displayMode === 'sidebyside' && (
+                  <div className="content-sidebyside-wrap">
+                    <SideBySideReader
+                      original={currentContent || ''}
+                      rewrite={currentEnrichment?.rewrite_text || ''}
+                    />
+                  </div>
+                )}
 
                 <footer className="content-footer">
                   <div className="content-divider" aria-hidden="true">
@@ -805,7 +1050,63 @@ function NovelReader({ novelId, onBack }) {
             </div>
           </div>
         </div>
+        {showEnrichmentPanel && (
+          <EnrichmentSidePanel
+            novelId={novelId}
+            chapter={chapters[currentIndex]}
+            novelTitle={novel?.title}
+            models={effectiveModels}
+            selectedModelId={selectedModelId}
+            onModelChange={setSelectedModelId}
+            onGoToWorkbench={onGoToWorkbench}
+            scrollRef={contentScrollRef}
+            onApplied={() => {
+              // 重新拉当前章节内容
+              if (chapters[currentIndex]) {
+                api.novels
+                  .chapter(novelId, chapters[currentIndex].id)
+                  .then((data) => {
+                    setContent(data.content || '');
+                    setEnrichmentMap((m) => ({ ...m, [chapters[currentIndex].id]: undefined }));
+                  })
+                  .catch(() => {});
+              }
+            }}
+            onReverted={() => {
+              if (chapters[currentIndex]) {
+                api.novels
+                  .chapter(novelId, chapters[currentIndex].id)
+                  .then((data) => {
+                    setContent(data.content || '');
+                  })
+                  .catch(() => {});
+              }
+            }}
+            onOpenHistory={() => setShowHistoryFor(chapters[currentIndex]?.id)}
+          />
+        )}
       </div>
+      {showHistoryFor && (
+        <SuggestionHistoryModal
+          chapterId={showHistoryFor}
+          onClose={() => setShowHistoryFor(null)}
+          onReverted={() => {
+            if (showHistoryFor) {
+              api.novels
+                .chapter(novelId, showHistoryFor)
+                .then((data) => {
+                  if (
+                    chapters[currentIndex] &&
+                    chapters[currentIndex].id === showHistoryFor
+                  ) {
+                    setContent(data.content || '');
+                  }
+                })
+                .catch(() => {});
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

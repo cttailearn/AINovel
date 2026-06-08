@@ -20,6 +20,9 @@ from config import ENRICHMENT_DEFAULT_CONCURRENCY
 from database import list_failed_chapter_ids
 from schemas import (
     ENRICHMENT_STEPS,
+    ApplyRequest,
+    ApplyResponse,
+    DiffResponse,
     EnrichmentBatchRequest,
     EnrichmentDetailResponse,
     EnrichmentProgressResponse,
@@ -27,8 +30,12 @@ from schemas import (
     EnrichmentRunRequest,
     EnrichmentRunResponse,
     EnrichmentUpdateRequest,
+    HistoryResponse,
+    RevertRequest,
+    RevertResponse,
 )
 from services import enrichment_service
+from services import enrichment_suggestion_service
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +87,15 @@ async def get_detail(chapter_id: int):
     detail = await enrichment_service.get_detail(chapter_id)
     if not detail:
         raise HTTPException(status_code=404, detail="章节不存在")
+    # v0.2 增量: 注入已应用 suggestion 信息
+    try:
+        applied = await enrichment_suggestion_service.get_current_applied_info(
+            chapter_id
+        )
+        detail.update(applied)
+    except Exception:  # noqa: BLE001
+        # 即便读不到 applied 信息, 详情接口也不应失败
+        logger.warning("get_current_applied_info failed for %s", chapter_id, exc_info=True)
     return detail
 
 
@@ -90,19 +106,89 @@ async def get_detail(chapter_id: int):
 async def update_chapter(
     chapter_id: int, payload: EnrichmentUpdateRequest
 ):
-    """手动编辑 summary / rewrite_text / scene_tag."""
+    """手动编辑 summary / recognition / rewrite_text / scene_tag / intent."""
     updated = await enrichment_service.update_manual(
         chapter_id,
         summary=payload.summary,
         rewrite_text=payload.rewrite_text,
         scene_tag=payload.scene_tag,
+        recognition=payload.recognition,
+        enrichment_intent=payload.enrichment_intent,
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="章节不存在或未发生变更")
     detail = await enrichment_service.get_detail(chapter_id)
     if not detail:
         raise HTTPException(status_code=404, detail="章节不存在")
+    try:
+        applied = await enrichment_suggestion_service.get_current_applied_info(
+            chapter_id
+        )
+        detail.update(applied)
+    except Exception:  # noqa: BLE001
+        pass
     return detail
+
+
+# ---------------------------------------------------------------------------
+# v0.2: diff / apply / revert / history
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/chapters/{chapter_id}/diff",
+    response_model=DiffResponse,
+)
+async def get_diff(chapter_id: int):
+    """对比当前 chapters.content 与 chapter_enrichments.rewrite_text."""
+    try:
+        data = await enrichment_suggestion_service.diff_chapter(chapter_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return data
+
+
+@router.post(
+    "/chapters/{chapter_id}/apply",
+    response_model=ApplyResponse,
+)
+async def apply_rewrite(chapter_id: int, payload: ApplyRequest):
+    """把 rewrite_text 落库到 chapters.content, 并写一条 applied 记录."""
+    try:
+        result = await enrichment_suggestion_service.apply_chapter(
+            chapter_id,
+            rewrite_text=payload.rewrite_text,
+            enrichment_intent=payload.enrichment_intent,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return result
+
+
+@router.post(
+    "/chapters/{chapter_id}/revert",
+    response_model=RevertResponse,
+)
+async def revert_rewrite(chapter_id: int, payload: RevertRequest):
+    """回滚到指定 suggestion 或最近一次 superseded 版本."""
+    try:
+        result = await enrichment_suggestion_service.revert_chapter(
+            chapter_id, target_suggestion_id=payload.target_suggestion_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return result
+
+
+@router.get(
+    "/chapters/{chapter_id}/history",
+    response_model=HistoryResponse,
+)
+async def get_history(chapter_id: int):
+    try:
+        return await enrichment_suggestion_service.list_history(chapter_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +241,7 @@ async def run_rewrite(chapter_id: int, payload: EnrichmentRunRequest):
             override_prompt=payload.override_prompt,
             general_rule=payload.general_rule,
             scene_rule=payload.scene_rule,
+            enrichment_intent=payload.enrichment_intent,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -294,10 +381,18 @@ async def retry_failed(novel_id: int):
 )
 async def reset(novel_id: int):
     try:
-        deleted = await enrichment_service.reset_novel(novel_id)
+        info = await enrichment_service.reset_novel(novel_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return EnrichmentResetResponse(novel_id=novel_id, deleted=deleted)
+    deleted = int(info.get("deleted_enrichments") or 0)
+    restored = int(info.get("restored_chapters") or 0)
+    return EnrichmentResetResponse(
+        novel_id=novel_id,
+        deleted=deleted,
+        message=f"已清空, 共还原 {restored} 章原始正文"
+        if restored
+        else "已清空加料结果",
+    )
 
 
 @router.get("/novels/{novel_id}/export")

@@ -13,12 +13,22 @@ const FRONTEND = path.resolve(__dirname, '..', 'frontend', 'src');
 const files = [
   'App.jsx',
   'api/client.js',
-  'components/EnrichmentPage.jsx',
   'components/EnrichmentWorkbench.jsx',
-  'components/enrichment/StepBar5.jsx',
-  'components/enrichment/ChapterNav.jsx',
-  'components/enrichment/ChapterDetail.jsx',
-  'components/enrichment/ProgressSummary.jsx',
+  'components/KnowledgeGraphPanel.jsx',
+  'components/NovelReader.jsx',
+  'components/Workbench.jsx',
+  'components/enrichment/SplitView.jsx',
+  'components/enrichment/SummaryView.jsx',
+  'components/enrichment/EnrichmentSidePanel.jsx',
+  'components/enrichment/HighlightedReader.jsx',
+  'components/enrichment/SuggestionHistoryModal.jsx',
+  'components/enrichment/EditableField.jsx',
+  'components/enrichment/ContextPreview.jsx',
+  'components/enrichment/MergedReader.jsx',
+  'components/enrichment/SideBySideReader.jsx',
+  'components/enrichment/EnrichmentOverview.jsx',
+  'utils/textDiffUtil.js',
+  'utils/paragraphDiff.js',
 ];
 
 let ok = true;

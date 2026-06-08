@@ -503,11 +503,13 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
         "key": "enrichment.rewrite",
         "category": "enrichment",
         "name": "AI 改写",
-        "description": "Step 3: 结合 summary + 人物事件 + 改写规则, 重写章节正文。",
+        "description": "Step 3: 结合 summary + 人物事件 + 改写规则 + 用户加料需求, 重写章节正文。",
         "system_prompt": (
             "你是一名擅长小说加料改写的写作助手。"
             "改写目标是: 在保留原章节主线和关键事件的前提下, 增强画面感、对话张力、动作细节与情绪渲染, "
             "避免偏离原作设定与人设。"
+            "用户会在「加料需求」中明确给出本次加料的方向, 请优先按用户意图展开, "
+            "若未给出则按通用规则均衡增强。"
             "输出仅包含改写后的正文, 不要解释、注释、Markdown 或章节标题。"
         ),
         "user_prompt_template": """请改写以下章节。
@@ -522,6 +524,9 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 
 【场景特定改写规则】
 {scene_rule}
+
+【用户加料需求】(可空, 优先遵循)
+{enrichment_intent}
 
 【原文】
 {chapter_text}
@@ -618,6 +623,7 @@ _PROMPT_VERSION_MARKERS: Dict[str, str] = {
     "kg.participation": "动机",
     "kg.char_relation": "亲疏程度",
     "kg.event_relation": "因果强度",
+    "enrichment.rewrite": "【用户加料需求】",
 }
 
 
@@ -675,43 +681,104 @@ async def _reset_stale_builtin_prompts(db: aiosqlite.Connection) -> int:
 
 
 async def seed_default_prompts() -> None:
-    """Insert default templates if the table is empty (first run).
+    """Insert default templates that are missing, on every startup.
 
-    Also refreshes any built-in template whose bundled content has been
-    updated in code (detected via per-key version markers). Customised
-    user prompts are left untouched.
+    Behaviour:
+    * If the table is empty (first run) — insert every default.
+    * If the table already has rows — for each default that is **not
+      present**, insert it. This covers the case where new default
+      categories (e.g. ``enrichment.*``) are added in a later code
+      release and need to be back-filled for existing installations.
+    * Then refresh any built-in whose bundled content changed
+      (detected via per-key version markers). User-customised prompts
+      are left untouched.
     """
     async with get_db() as db:
         cur = await db.execute("SELECT COUNT(*) AS c FROM prompt_templates")
         row = await cur.fetchone()
         existing = row[0] if row else 0
+
+        # 1) Collect keys that already exist
+        cur = await db.execute("SELECT key FROM prompt_templates")
+        existing_keys = {r[0] for r in await cur.fetchall()}
+
+        # 2) Insert every default whose key is missing
+        missing = [t for t in DEFAULT_PROMPTS if t["key"] not in existing_keys]
+        for tmpl in missing:
+            await db.execute(
+                """
+                INSERT INTO prompt_templates
+                    (key, name, category, description, system_prompt,
+                     user_prompt_template, temperature, max_tokens,
+                     is_builtin, is_enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+                """,
+                (
+                    tmpl["key"],
+                    tmpl["name"],
+                    tmpl["category"],
+                    tmpl.get("description") or "",
+                    tmpl.get("system_prompt", ""),
+                    tmpl.get("user_prompt_template", ""),
+                    float(tmpl.get("temperature", 0.3)),
+                    int(tmpl.get("max_tokens", 2400)),
+                ),
+            )
+
         if existing == 0:
-            for tmpl in DEFAULT_PROMPTS:
-                await db.execute(
-                    """
-                    INSERT INTO prompt_templates
-                        (key, name, category, description, system_prompt,
-                         user_prompt_template, temperature, max_tokens,
-                         is_builtin, is_enabled)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
-                    """,
-                    (
-                        tmpl["key"],
-                        tmpl["name"],
-                        tmpl["category"],
-                        tmpl.get("description") or "",
-                        tmpl.get("system_prompt", ""),
-                        tmpl.get("user_prompt_template", ""),
-                        float(tmpl.get("temperature", 0.3)),
-                        int(tmpl.get("max_tokens", 2400)),
-                    ),
-                )
-            await db.commit()
             logger.info("Seeded %d default prompt templates", len(DEFAULT_PROMPTS))
-        else:
-            refreshed = await _reset_stale_builtin_prompts(db)
-            if refreshed:
-                await db.commit()
+        elif missing:
+            logger.info(
+                "Back-filled %d missing default prompt templates: %s",
+                len(missing),
+                ", ".join(t["key"] for t in missing),
+            )
+
+        # 3) Refresh any built-in whose bundled content has been updated
+        refreshed = await _reset_stale_builtin_prompts(db)
+        if missing or refreshed:
+            await db.commit()
+
+
+async def reseed_default_prompts() -> Dict[str, int]:
+    """Force-insert every bundled default whose key is missing.
+
+    Returns a small summary dict useful for the CLI helper. Existing
+    rows (including user-edited built-ins) are never overwritten.
+    """
+    async with get_db() as db:
+        cur = await db.execute("SELECT key FROM prompt_templates")
+        existing_keys = {r[0] for r in await cur.fetchall()}
+        inserted: List[str] = []
+        for tmpl in DEFAULT_PROMPTS:
+            if tmpl["key"] in existing_keys:
+                continue
+            await db.execute(
+                """
+                INSERT INTO prompt_templates
+                    (key, name, category, description, system_prompt,
+                     user_prompt_template, temperature, max_tokens,
+                     is_builtin, is_enabled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+                """,
+                (
+                    tmpl["key"],
+                    tmpl["name"],
+                    tmpl["category"],
+                    tmpl.get("description") or "",
+                    tmpl.get("system_prompt", ""),
+                    tmpl.get("user_prompt_template", ""),
+                    float(tmpl.get("temperature", 0.3)),
+                    int(tmpl.get("max_tokens", 2400)),
+                ),
+            )
+            inserted.append(tmpl["key"])
+        await db.commit()
+    return {
+        "total_defaults": len(DEFAULT_PROMPTS),
+        "inserted": len(inserted),
+        "inserted_keys": inserted,
+    }
 
 
 def _row_to_dict(row) -> Dict[str, Any]:

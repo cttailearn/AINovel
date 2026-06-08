@@ -390,6 +390,12 @@ export const api = {
         body: payload,
         ...options,
       }),
+    // v0.2.1: 一键生成 (summary + recognition + rewrite) 走 batch
+    runFull: (chapterId, payload, { onEvent, signal } = {}) =>
+      postStream(`/enrichment/novels/${payload.novelId || chapterId}/batch`, {
+        ...payload,
+        chapter_ids: [chapterId],
+      }, { onEvent, signal }),
     batch: (novelId, payload, { onEvent, signal } = {}) =>
       postStream(`/enrichment/novels/${novelId}/batch`, payload, {
         onEvent,
@@ -407,5 +413,22 @@ export const api = {
       }),
     exportUrl: (novelId) =>
       `${API_PREFIX}/enrichment/novels/${novelId}/export`,
+    // v0.2: 应用 / 回滚 / 历史 / diff
+    diff: (chapterId, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}/diff`, options),
+    apply: (chapterId, payload = {}, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}/apply`, {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
+    revert: (chapterId, payload = {}, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}/revert`, {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
+    history: (chapterId, options) =>
+      apiRequest(`/enrichment/chapters/${chapterId}/history`, options),
   },
 };

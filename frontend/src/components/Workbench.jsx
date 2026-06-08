@@ -4,6 +4,8 @@ import { ConfirmDialog } from './Modal/ConfirmDialog.jsx';
 import { useToast } from './Toast/ToastProvider.jsx';
 import { PRESET_RULES, tryCompileRegex } from '../utils/regex.js';
 import NovelReader from './NovelReader.jsx';
+import { EnrichmentWorkbench } from './EnrichmentWorkbench.jsx';
+import { KnowledgeGraphPanel } from './KnowledgeGraphPanel.jsx';
 
 const DEFAULT_RULE = PRESET_RULES[0].value;
 const STEPS = [
@@ -297,11 +299,12 @@ function detailReducer(state, action) {
   }
 }
 
-function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged }) {
+function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged, initialTab, onGoToSettings }) {
   const toast = useToast();
   const [state, dispatch] = useReducer(detailReducer, initialDetailState);
   const [chunkSize, setChunkSize] = useState(5000);
-  const [activePane, setActivePane] = useState('toc');
+  const [activePane, setActivePane] = useState(initialTab || 'toc');
+  const [reloadKey, setReloadKey] = useState(0);
   const abortRef = useRef(null);
 
   useEffect(() => {
@@ -499,12 +502,15 @@ function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged }) 
 
       <StepBar current={hasChapters ? 'toc' : 'parse'} />
 
-      <div className="pane-tabs">
+      <div className="pane-tabs novel-detail-tabs">
         <button
           type="button"
           className={`pane-tab ${activePane === 'parse' ? 'active' : ''}`}
           onClick={() => setActivePane('parse')}
         >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <path d="M3 4h18M3 8h18M3 12h12M3 16h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
           解析目录
         </button>
         <button
@@ -513,10 +519,44 @@ function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged }) 
           onClick={() => setActivePane('toc')}
           disabled={!hasChapters}
         >
-          章节列表 {hasChapters && <span className="pane-tag">{chapters.length}</span>}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+          章节列表
+          {hasChapters && <span className="pane-tag">{chapters.length}</span>}
+        </button>
+        <button
+          type="button"
+          className={`pane-tab ${activePane === 'enrichment' ? 'active' : ''}`}
+          onClick={() => setActivePane('enrichment')}
+          disabled={!hasChapters}
+          title={hasChapters ? 'AI 加料:摘要 / 识别 / 改写' : '解析章节后才能使用'}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.5" />
+          </svg>
+          AI 加料
+        </button>
+        <button
+          type="button"
+          className={`pane-tab ${activePane === 'kg' ? 'active' : ''}`}
+          onClick={() => setActivePane('kg')}
+          disabled={!hasChapters}
+          title={hasChapters ? '知识图谱:人物 / 事件 / 关系' : '解析章节后才能使用'}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
+            <circle cx="4" cy="6" r="2" stroke="currentColor" strokeWidth="1.5" />
+            <circle cx="20" cy="6" r="2" stroke="currentColor" strokeWidth="1.5" />
+            <circle cx="4" cy="18" r="2" stroke="currentColor" strokeWidth="1.5" />
+            <circle cx="20" cy="18" r="2" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M6 6l4 4M18 6l-4 4M6 18l4-4M18 18l-4-4" stroke="currentColor" strokeWidth="1.2" />
+          </svg>
+          知识图谱
         </button>
         <div className="pane-spacer" />
-        {hasChapters && (
+        {hasChapters && activePane !== 'enrichment' && activePane !== 'kg' && (
           <button
             type="button"
             className="start-reading-btn"
@@ -641,11 +681,36 @@ function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged }) 
           )}
         </div>
       )}
+
+      {activePane === 'enrichment' && hasChapters && (
+        <div className="embedded-panel enrichment-embedded">
+          <EnrichmentWorkbench
+            key={`${novelId}-${reloadKey}`}
+            novelId={novelId}
+            novel={state.novel}
+            models={models}
+            onGoToSettings={onGoToSettings}
+            onJumpToParse={() => setActivePane('parse')}
+            onJumpToReading={() => onStartReading(novelId)}
+          />
+        </div>
+      )}
+
+      {activePane === 'kg' && hasChapters && (
+        <div className="embedded-panel kg-embedded">
+          <KnowledgeGraphPanel
+            key={`${novelId}-${reloadKey}`}
+            novelId={novelId}
+            models={models}
+            novelTitle={state.novel?.title}
+          />
+        </div>
+      )}
     </div>
   );
 }
 
-export function Workbench({ models, topSearch = '' }) {
+export function Workbench({ models, topSearch = '', onGoToSettings }) {
   const toast = useToast();
   const [view, setView] = useState('list');
   const [selectedId, setSelectedId] = useState(null);
@@ -740,6 +805,7 @@ export function Workbench({ models, topSearch = '' }) {
           onBack={handleBackToList}
           onStartReading={(id) => setReadingId(id)}
           onChanged={fetchNovels}
+          onGoToSettings={onGoToSettings}
         />
         {readingId && (
           <NovelReader novelId={readingId} onBack={() => setReadingId(null)} />

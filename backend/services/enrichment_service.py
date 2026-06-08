@@ -225,6 +225,7 @@ async def get_detail(chapter_id: int) -> Optional[Dict[str, Any]]:
         "rewrite_error": e.get("rewrite_error"),
         "rewrite_model_id": e.get("rewrite_model_id"),
         "scene_tag": e.get("scene_tag"),
+        "enrichment_intent": e.get("enrichment_intent"),
         "status": _enrich_status({"summary": ss, "recognition": rs, "rewrite": ws}),
         "error": e.get("error"),
         "updated_at": str(e.get("updated_at")) if e.get("updated_at") else None,
@@ -237,6 +238,8 @@ async def update_manual(
     summary: Optional[str] = None,
     rewrite_text: Optional[str] = None,
     scene_tag: Optional[str] = None,
+    recognition: Optional[Dict[str, Any]] = None,
+    enrichment_intent: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     chapter = await get_chapter_with_file_by_chapter_id(chapter_id)
     if not chapter:
@@ -253,6 +256,15 @@ async def update_manual(
         fields["rewrite_error"] = None
     if scene_tag is not None:
         fields["scene_tag"] = scene_tag
+    if recognition is not None:
+        fields["recognition"] = recognition
+        fields["recognition_status"] = "done"
+        fields["recognition_error"] = None
+    if enrichment_intent is not None:
+        # intent 不存到 chapter_enrichments 表, 但可临时存在 enrichment_intent 列
+        # 当前 schema 没有, 这里直接通过 upsert 写一个"intent"在 json 里;
+        # 简化: 暂不持久化到 enrichment, 仅在 run_step 时使用
+        pass
     if not fields:
         return await get_enrichment_by_chapter(chapter_id)
     fields["status"] = "partial"  # 由 get_detail 重新计算
@@ -274,6 +286,7 @@ async def run_step(
     override_prompt: Optional[str] = None,
     general_rule: Optional[str] = None,
     scene_rule: Optional[str] = None,
+    enrichment_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """执行单章的单个步骤, 完成后回写数据库."""
     if step not in ENRICHMENT_STEPS:
@@ -340,6 +353,7 @@ async def run_step(
             recognition=existing.get("recognition") or {},
             general_rule=general_rule,
             scene_rule=scene_rule,
+            enrichment_intent=enrichment_intent,
         )
         await upsert_enrichment(
             novel_id=novel_id,
@@ -388,6 +402,7 @@ async def run_batch(
     skip_existing: bool = True,
     general_rule: Optional[str] = None,
     scene_rule: Optional[str] = None,
+    enrichment_intent: Optional[str] = None,
     on_event: Optional[ProgressCallback] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> None:
@@ -468,6 +483,7 @@ async def run_batch(
                     model_config_id=model_config_id,
                     general_rule=general_rule,
                     scene_rule=scene_rule,
+                    enrichment_intent=enrichment_intent,
                 )
                 step_progress[step]["done"] += 1
                 await emit({
@@ -522,40 +538,97 @@ async def run_batch(
 # ---------------------------------------------------------------------------
 
 
-async def reset_novel(novel_id: int) -> int:
+async def reset_novel(novel_id: int) -> Dict[str, int]:
+    """清空某本书的所有加料结果.
+
+    v0.2 行为: 对每个有 applied 记录的章节, 用其最早的 original_snapshot
+    还原 chapters.content, 再删除 enrichment_suggestions 和 chapter_enrichments.
+    """
+    from database import get_db
+
     novel = await get_novel_by_id(novel_id)
     if not novel:
         raise ValueError("小说不存在")
-    return await reset_novel_enrichments(novel_id)
+    restored = 0
+    async with get_db() as db:
+        # 找每章最早的 suggestion (按 id 升序)
+        cur = await db.execute(
+            """
+            SELECT chapter_id, original_snapshot
+            FROM enrichment_suggestions
+            WHERE novel_id = ?
+            GROUP BY chapter_id
+            HAVING MIN(id)
+            """,
+            (novel_id,),
+        )
+        earliest_rows = await cur.fetchall()
+        for row in earliest_rows:
+            original_snapshot = str(row["original_snapshot"] or "")
+            chapter_id = int(row["chapter_id"])
+            await db.execute(
+                """
+                UPDATE chapters
+                SET content = ?, start_position = 0, end_position = ?
+                WHERE id = ? AND novel_id = ?
+                """,
+                (original_snapshot, len(original_snapshot), chapter_id, novel_id),
+            )
+            restored += 1
+        await db.execute(
+            "DELETE FROM enrichment_suggestions WHERE novel_id = ?",
+            (novel_id,),
+        )
+        await db.commit()
+    deleted = await reset_novel_enrichments(novel_id)
+    return {"restored_chapters": restored, "deleted_enrichments": deleted}
 
 
 async def export_enriched_txt(novel_id: int) -> Tuple[str, str]:
-    """把已加料的章节拼成一份 TXT, 返回 (filename, content)."""
+    """把已加料的章节拼成一份 TXT, 返回 (filename, content).
+
+    v0.2: 章节内容以 ``chapters.content`` 为准 (即用户已应用的版本).
+    统计基于 ``enrichment_suggestions`` 中 status='applied' 的数量.
+    """
     novel = await get_novel_by_id(novel_id)
     if not novel:
         raise ValueError("小说不存在")
     chapters = await get_chapters_by_novel(novel_id)
-    enrichments = {e["chapter_id"]: e for e in await list_enrichment_by_novel(novel_id)}
+
+    # 取每章 applied 数量
+    from database import get_db
+
+    applied_map: Dict[int, int] = {}
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT chapter_id, COUNT(*) AS c
+            FROM enrichment_suggestions
+            WHERE novel_id = ? AND status = 'applied'
+            GROUP BY chapter_id
+            """,
+            (novel_id,),
+        )
+        for row in await cur.fetchall():
+            applied_map[int(row["chapter_id"])] = int(row["c"])
 
     parts: List[str] = []
-    used_rewrite = 0
+    used_applied = 0
     used_original = 0
     for c in chapters:
-        e = enrichments.get(c["id"]) or {}
-        text = (e.get("rewrite_text") or "").strip()
-        if text and e.get("rewrite_status") == "done":
-            used_rewrite += 1
+        text = await _read_chapter_content(c)
+        text = (text or "").strip()
+        if applied_map.get(c["id"]):
+            used_applied += 1
         else:
-            # 回退到原章节正文
-            text = await _read_chapter_content(c)
             used_original += 1
-        parts.append(f"\n\n{c['title']}\n\n{text.strip()}\n")
+        parts.append(f"\n\n{c['title']}\n\n{text}\n")
     body = "".join(parts).strip() + "\n"
     header = (
-        f"# 《{novel['title']}》 加料版\n"
+        f"# 《{novel['title']}》 当前版本\n"
         f"# 作者: {novel.get('author') or '未知作者'}\n"
-        f"# 来源: 原文 + AI 加料改写\n"
-        f"# 统计: 加料章节 {used_rewrite} / 原文兜底 {used_original} / 总章节 {len(chapters)}\n"
+        f"# 来源: 原文 + AI 加料改写 (v0.2: 已应用的内容已合并入正文)\n"
+        f"# 统计: 已加料 {used_applied} / 原文 {used_original} / 总章节 {len(chapters)}\n"
         f"# 注意: 本文件由 AI 加料工作台自动生成, 仅供学习/研究使用.\n\n"
     )
     safe_title = re.sub(r"[\\/:*?\"<>|\r\n]", "_", str(novel["title"])).strip() or "novel"
@@ -726,6 +799,7 @@ async def _step_rewrite(
     recognition: Dict[str, Any],
     general_rule: Optional[str] = None,
     scene_rule: Optional[str] = None,
+    enrichment_intent: Optional[str] = None,
 ) -> str:
     recognition_json = json.dumps(recognition or {}, ensure_ascii=False, indent=2)
     user_prompt = _build_user_prompt(
@@ -738,6 +812,7 @@ async def _step_rewrite(
             "scene_tag": (recognition or {}).get("scene_tag") or "",
             "general_rule": general_rule or "",
             "scene_rule": scene_rule or "",
+            "enrichment_intent": (enrichment_intent or "").strip() or "（无）",
         },
     )
     raw = await _call_llm(model_cfg, tmpl, user_prompt)
