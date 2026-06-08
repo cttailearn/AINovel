@@ -615,3 +615,124 @@ class HistoryResponse(BaseModel):
     novel_id: int
     items: List[SuggestionOut]
 
+
+# ---------------------------------------------------------------------------
+# AI 小说创作 (AI Creation) — 三 Agent 流程
+# ---------------------------------------------------------------------------
+
+
+class AiProjectCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    genre: str = Field(default="", max_length=200)
+    worldview: str = Field(default="", max_length=20_000)
+    outline: str = Field(default="", max_length=50_000)
+    initial_concepts: List[Dict[str, Any]] = Field(default_factory=list)
+    style_pref: Dict[str, Any] = Field(default_factory=dict)
+    model_id: Optional[int] = Field(default=None, ge=1)
+
+
+class AiProjectUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    genre: Optional[str] = Field(default=None, max_length=200)
+    worldview: Optional[str] = Field(default=None, max_length=20_000)
+    outline: Optional[str] = Field(default=None, max_length=50_000)
+    initial_concepts: Optional[List[Dict[str, Any]]] = None
+    style_pref: Optional[Dict[str, Any]] = None
+    model_id: Optional[int] = Field(default=None, ge=1)
+    status: Optional[str] = Field(default=None, max_length=50)
+
+
+class AiProjectOut(BaseModel):
+    id: int
+    title: str
+    genre: str
+    worldview: str
+    outline: str
+    initial_concepts: List[Dict[str, Any]] = Field(default_factory=list)
+    style_pref: Dict[str, Any] = Field(default_factory=dict)
+    model_id: Optional[int] = None
+    current_chapter_no: int
+    status: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class AiProjectListResponse(BaseModel):
+    projects: List[AiProjectOut]
+
+
+class AiProjectDetailResponse(BaseModel):
+    project: AiProjectOut
+    chapters: List["AiChapterOut"] = []
+    kg_stats: Dict[str, int] = Field(default_factory=dict)
+
+
+class AiChapterOut(BaseModel):
+    id: int
+    project_id: int
+    chapter_no: int
+    title: str
+    user_intent: str
+    status: str
+    selected_variant_id: Optional[int] = None
+    final_content: Optional[str] = None
+    word_count: int
+    kg_extracted: int
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    confirmed_at: Optional[str] = None
+    variants: List["AiVariantOut"] = Field(default_factory=list)
+
+
+class AiChapterListResponse(BaseModel):
+    chapters: List[AiChapterOut]
+
+
+class AiChapterDetailResponse(BaseModel):
+    chapter: AiChapterOut
+
+
+class AiVariantOut(BaseModel):
+    id: int
+    chapter_id: int
+    variant_index: int
+    planner_direction: str
+    content: str
+    focus_summary: str
+    kg_diff: Dict[str, Any] = Field(default_factory=dict)
+    critic_report: Dict[str, Any] = Field(default_factory=dict)
+    score: float
+    model_id: Optional[int] = None
+    created_at: Optional[str] = None
+    word_count: int = 0
+
+
+class AiChapterGenerateRequest(BaseModel):
+    user_intent: str = Field(default="", max_length=4000)
+    chapter_no: Optional[int] = Field(
+        default=None, ge=1, description="不传则用 project.current_chapter_no"
+    )
+    title: str = Field(default="", max_length=200)
+
+
+class AiChapterSelectRequest(BaseModel):
+    variant_id: int = Field(..., ge=1)
+
+
+class AiChapterContentUpdate(BaseModel):
+    content: str = Field(..., min_length=0)
+
+
+class AiKGSummary(BaseModel):
+    characters: int
+    events: int
+    participations: int
+    character_relations: int
+    event_relations: int
+
+
+# Resolve forward references
+AiProjectDetailResponse.model_rebuild()
+AiChapterOut.model_rebuild()
+
+

@@ -7,6 +7,7 @@ import { Workbench } from './components/Workbench.jsx';
 import { ImageGenerationPage } from './components/ImageGenerationPage.jsx';
 import { EnrichmentTaskBanner } from './components/EnrichmentTaskBanner.jsx';
 import { EnrichmentTaskProvider, useEnrichmentTask } from './state/EnrichmentTaskContext.jsx';
+import { CreationStudio } from './components/creation/CreationStudio.jsx';
 import { useTheme } from './ThemeContext.jsx';
 import './App.css';
 
@@ -70,6 +71,18 @@ const NAV_ITEMS = [
     ),
   },
   {
+    key: 'creation',
+    title: 'AI 小说创作',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
+        <path d="M12 19l7-7 3 3-7 7-3-3z" stroke="currentColor" strokeLinejoin="round" />
+        <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" stroke="currentColor" strokeLinejoin="round" />
+        <path d="M2 2l7.586 7.586" stroke="currentColor" />
+        <circle cx="11" cy="11" r="2" stroke="currentColor" />
+      </svg>
+    ),
+  },
+  {
     key: 'image',
     title: '图像生成',
     icon: (
@@ -99,6 +112,7 @@ const NAV_ITEMS = [
 
 const PAGE_META = {
   workbench: { title: '我的项目', sub: '管理、解析、阅读、加料、知识图谱 — 一站式工作台' },
+  creation: { title: 'AI 小说创作', sub: '三 Agent 协作 · 三选一 · 知识图谱记忆 — 从零逐章生成' },
   image: { title: '图像生成', sub: '文生图 / 图生图，多模型、多风格' },
   settings: { title: '系统设置', sub: '配置模型与提示词' },
 };
@@ -265,6 +279,8 @@ function AppShell() {
                 setActiveNav('settings');
               }}
             />
+          ) : activeNav === 'creation' ? (
+            <CreationStudio models={models} topSearch={topSearch} />
           ) : activeNav === 'image' ? (
             <ImageGenerationPage models={models} topSearch={topSearch} />
           ) : modelsLoading ? (

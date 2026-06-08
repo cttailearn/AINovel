@@ -1,5 +1,21 @@
-from . import file_service, prompt_service
+from . import creation_service, file_service, prompt_service
 from .ai_service import test_connection
+from .creation_service import (
+    confirm_chapter as confirm_ai_chapter,
+    create_project as create_ai_project,
+    delete_kg as delete_ai_kg,
+    delete_project as delete_ai_project,
+    generate_chapter_streaming,
+    get_chapter_detail as get_ai_chapter_detail,
+    get_kg as get_ai_kg,
+    get_project_detail as get_ai_project_detail,
+    list_chapters as list_ai_chapters,
+    list_projects as list_ai_projects,
+    seed_kg_from_concepts,
+    select_variant as select_ai_variant,
+    update_chapter_content as update_ai_chapter_content,
+    update_project as update_ai_project,
+)
 from .enrichment_service import (
     ENRICHMENT_STEPS as _ENRICH_STEPS,
     export_enriched_txt,

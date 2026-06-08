@@ -56,6 +56,11 @@ PROMPT_CATEGORIES = [
         "label": "改写规则·场景",
         "description": "改写步骤中按场景命中的规则子模板（如高燃战斗 / 情感爆发 / 推理悬疑）。",
     },
+    {
+        "key": "creation",
+        "label": "AI 小说创作",
+        "description": "AI 小说创作工作流的 Agent 提示词: 决策 / 撰写 / 审核 / 单章实体抽取。",
+    },
 ]
 
 
@@ -605,6 +610,204 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 - 避免直白的「她很伤心」, 用细节代替""",
         "temperature": 0.4,
         "max_tokens": 2400,
+    },
+    # ============================================================
+    # AI 小说创作 (三 Agent + 单章抽取)
+    # ============================================================
+    {
+        "key": "creation.planner.direction",
+        "category": "creation",
+        "name": "决策 Agent (Planner)",
+        "description": "根据大纲、已有剧情摘要、当前知识图谱与用户意图, 生成 3 个差异化分叉方向.",
+        "system_prompt": (
+            "你是一名长篇小说总编剧. 你的任务是结合创作大纲、上一章摘要、当前"
+            "知识图谱(人物 / 地点 / 未完结事件 / 未回收伏笔) 与用户本轮意图,"
+            "为下一章设计 3 个**真正不同**的剧情分叉方向."
+            "每个方向必须包含: 标题, 一句话梗概, 必须出场的关键实体, 必须推进/回收的伏笔,"
+            "情绪基调, 与已有设定的硬约束 (不要让角色做违反人设的事)."
+            "只输出严格 JSON, 不要解释、注释或 Markdown 代码块."
+        ),
+        "user_prompt_template": """# 项目设定
+- 标题: {project_title}
+- 类型: {genre}
+- 世界观: {worldview}
+- 大纲: {outline}
+- 文风偏好: {style_pref}
+
+# 知识图谱 (主角 / 关键人物 / 未完结事件 / 未回收伏笔)
+{kg_context}
+
+# 上一章摘要 (用于衔接文风与情节)
+{last_chapter_summary}
+
+# 用户本轮意图 / 偏好
+{user_intent}
+
+# 任务
+为第 {chapter_no} 章生成 3 个**相互差异化**的分叉方向:
+1. 一个偏动作 / 冲突驱动
+2. 一个偏心理 / 情感驱动
+3. 一个偏意外 / 反转或世界观展开
+
+【严格 JSON 输出】格式:
+{{
+  "directions": [
+    {{
+      "index": 0,
+      "title": "方向标题 (≤15 字)",
+      "synopsis": "一句话梗概 (≤80 字)",
+      "focus": "动作 | 心理 | 意外",
+      "key_entities": ["实体 1", "实体 2"],
+      "foreshadowing": ["要推进的伏笔 1", "要回收的伏笔 2"],
+      "tone": "紧张 | 温馨 | 悲壮 | 悬疑 | 热血",
+      "hard_constraints": ["禁止冲突: ...", "角色限制: ..."],
+      "key_event": "本章核心事件 (1-2 句)"
+    }},
+    ... 共 3 个
+  ]
+}}""",
+        "temperature": 0.5,
+        "max_tokens": 2400,
+    },
+    {
+        "key": "creation.writer.chapter",
+        "category": "creation",
+        "name": "执行 Agent (Writer)",
+        "description": "按 Planner 给定的方向 + 知识图谱上下文, 撰写完整章节正文 (1500-3000 字).",
+        "system_prompt": (
+            "你是一名长篇小说作者. 你将根据决策 Agent 给定的方向,"
+            "结合知识图谱中的人物 / 地点 / 过往事件, 撰写一个完整章节."
+            "要求: 字数 1500-3000 字; 文风与上一章末尾自然衔接;"
+            "只输出章节正文 (可含小标题), 不要章节元信息 / 注释 / Markdown 代码块."
+        ),
+        "user_prompt_template": """# 项目设定
+- 标题: {project_title}
+- 类型: {genre}
+- 世界观: {worldview}
+- 文风偏好: {style_pref}
+
+# 上一章末尾段落 (用于衔接文风)
+{last_chapter_tail}
+
+# 知识图谱上下文 (主角 / 出场人物 / 关键地点 / 未完结事件)
+{kg_context}
+
+# 决策 Agent 给定的方向
+- 标题: {direction_title}
+- 梗概: {direction_synopsis}
+- 侧重点: {direction_focus}
+- 关键实体: {direction_entities}
+- 必须推进 / 回收的伏笔: {direction_foreshadowing}
+- 情绪基调: {direction_tone}
+- 硬约束: {direction_constraints}
+- 本章核心事件: {direction_key_event}
+
+# 用户本轮意图
+{user_intent}
+
+# 任务
+撰写第 {chapter_no} 章完整正文. 不要生造新角色 / 新支线.
+字数控制在 1500-3000 字. 输出格式:
+- 第 1 段: 直接进入正文, 不要章节标题 / 引子
+- 中间: 完整情节展开
+- 末段: 自然收尾, 为下一章留 1-2 处钩子""",
+        "temperature": 0.7,
+        "max_tokens": 4000,
+    },
+    {
+        "key": "creation.critic.review",
+        "category": "creation",
+        "name": "审核 Agent (Critic)",
+        "description": "对单个候选章节做多维度审核, 输出评分 + 优缺点 + 修改建议.",
+        "system_prompt": (
+            "你是一名长篇小说审稿编辑. 你将根据一致性 / 逻辑 / 伏笔 / 文笔 / 差异化 5 个维度,"
+            "对单个候选章节做严格审核, 并给出 0-10 分的综合评分 + 优缺点 + 具体修改建议."
+            "只输出严格 JSON, 不要解释、注释或 Markdown 代码块."
+        ),
+        "user_prompt_template": """# 章节正文 (待审核)
+{chapter_content}
+
+# 项目设定
+- 标题: {project_title}
+- 类型: {genre}
+- 世界观: {worldview}
+
+# 知识图谱 (用于一致性核查)
+{kg_context}
+
+# 上一章摘要 (用于衔接核查)
+{last_chapter_summary}
+
+# 决策方向 (与本候选匹配)
+- 方向: {direction_title} ({direction_focus})
+- 硬约束: {direction_constraints}
+
+# 任务
+按以下 5 个维度 0-10 打分, 并指出具体问题:
+1. 一致性: 与知识图谱是否冲突 (人物关系 / 设定 / 时间线)
+2. 逻辑性: 情节是否合理, 人物行为是否符合性格
+3. 伏笔: 是否遗漏必须回收 / 推进的伏笔
+4. 文笔: 行文流畅度 / 节奏感 / 对话自然度
+5. 差异化: 本版本与同章其他候选的差异度 (自评)
+
+【严格 JSON 输出】格式:
+{{
+  "scores": {{"consistency": 8, "logic": 7, "foreshadowing": 6, "style": 9, "differentiation": 7}},
+  "overall": 7.4,
+  "strengths": ["亮点 1", "亮点 2"],
+  "issues": ["问题 1", "问题 2"],
+  "modifications": ["具体修改建议 1", "具体修改建议 2"],
+  "kg_conflicts": [
+    {{"entity": "实体名", "claim": "章节中的陈述", "kg_fact": "图谱中的事实", "severity": "warn|error"}}
+  ]
+}}""",
+        "temperature": 0.3,
+        "max_tokens": 1600,
+    },
+    {
+        "key": "creation.extractor.entity",
+        "category": "creation",
+        "name": "单章实体抽取",
+        "description": "章节确认后, 从正文抽取人物 / 事件 / 关系, 入项目级知识图谱.",
+        "system_prompt": (
+            "你是一名小说知识图谱构建专家. 从给定的章节正文中抽取:"
+            "1) 人物实体 (含姓名 + 内在属性);"
+            "2) 事件实体 (含事件名 + 内在属性);"
+            "3) 人物-事件 参与关系 (含 role / action);"
+            "4) 人物-人物 关系 (含 relation);"
+            "5) 事件-事件 关系 (含 relation, 如因果 / 包含 / 顺序)."
+            "只输出严格 JSON, 不要解释、注释或 Markdown 代码块."
+        ),
+        "user_prompt_template": """# 章节正文
+{chapter_text}
+
+# 任务
+抽取本章中**本章节首次登场**或**本章发生显著状态变化**的实体和关系.
+对延续已知图谱的实体, 仅记录**新属性**与**新关系**, 避免重复入库.
+注意:
+- entity_id 用 `char_NNN` / `evt_NNN` 形式, 复用上文已出现的同名 ID.
+- attributes 只记录标量属性 (姓名 / 性别 / 外貌 / 性格 / 身份 / 当前状态 等).
+
+【严格 JSON 输出】格式:
+{{
+  "characters": [
+    {{"entity_id": "char_001", "name": "张三", "attributes": {{"性别": "男", "身份": "剑客", "当前状态": "负伤"}}}}
+  ],
+  "events": [
+    {{"entity_id": "evt_001", "name": "张三夜探幽冥谷", "attributes": {{"时间": "深夜", "地点": "幽冥谷", "重要性": "高"}}}}
+  ],
+  "character_event_relations": [
+    {{"source": "char_001", "target": "evt_001", "relation": "PARTICIPATES_IN", "role": "主角", "action": "探索"}}
+  ],
+  "character_relations": [
+    {{"source": "char_001", "target": "char_002", "relation": "师徒", "properties": {{"亲疏": "亲近"}}}}
+  ],
+  "event_relations": [
+    {{"source": "evt_001", "target": "evt_002", "relation": "导致", "properties": {{"因果强度": "强"}}}}
+  ]
+}}""",
+        "temperature": 0.2,
+        "max_tokens": 3000,
     },
 ]
 

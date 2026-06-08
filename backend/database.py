@@ -209,6 +209,158 @@ SCHEMA_STATEMENTS: List[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_suggestions_chapter ON enrichment_suggestions(chapter_id)",
     "CREATE INDEX IF NOT EXISTS idx_suggestions_status ON enrichment_suggestions(status)",
+    # ============================================================
+    # AI 小说创作 (AI Creation) — 与 novels + 加料 物理隔离的独立子模块
+    # ============================================================
+    """
+    CREATE TABLE IF NOT EXISTS ai_projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        genre TEXT NOT NULL DEFAULT '',
+        worldview TEXT NOT NULL DEFAULT '',
+        outline TEXT NOT NULL DEFAULT '',
+        initial_concepts TEXT,
+        style_pref TEXT,
+        model_id INTEGER,
+        current_chapter_no INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'draft',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_projects_created ON ai_projects(created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_projects_status ON ai_projects(status)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_chapters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        chapter_no INTEGER NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        user_intent TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'draft',
+        selected_variant_id INTEGER,
+        final_content TEXT,
+        word_count INTEGER NOT NULL DEFAULT 0,
+        kg_extracted INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        confirmed_at TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        UNIQUE (project_id, chapter_no)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_chapters_project ON ai_chapters(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_chapters_status ON ai_chapters(status)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_chapter_variants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chapter_id INTEGER NOT NULL,
+        variant_index INTEGER NOT NULL,
+        planner_direction TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        focus_summary TEXT NOT NULL DEFAULT '',
+        kg_diff TEXT,
+        critic_report TEXT,
+        score REAL NOT NULL DEFAULT 0,
+        model_id INTEGER,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (chapter_id) REFERENCES ai_chapters(id) ON DELETE CASCADE,
+        UNIQUE (chapter_id, variant_index)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_variants_chapter ON ai_chapter_variants(chapter_id)",
+    # ---- AI 创作专用知识图谱 (与现有 novels KG 物理隔离) ----
+    """
+    CREATE TABLE IF NOT EXISTS ai_kg_characters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        entity_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        attributes TEXT,
+        source_chapter_id INTEGER,
+        model_id INTEGER,
+        extras TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL,
+        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL,
+        UNIQUE (project_id, entity_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_characters_project ON ai_kg_characters(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_characters_entity ON ai_kg_characters(project_id, entity_id)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_kg_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        entity_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        attributes TEXT,
+        source_chapter_id INTEGER,
+        model_id INTEGER,
+        extras TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL,
+        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL,
+        UNIQUE (project_id, entity_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_events_project ON ai_kg_events(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_events_entity ON ai_kg_events(project_id, entity_id)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_kg_character_event_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        source_entity_id TEXT NOT NULL,
+        target_entity_id TEXT NOT NULL,
+        relation TEXT NOT NULL DEFAULT 'PARTICIPATES_IN',
+        role TEXT,
+        action TEXT,
+        properties TEXT,
+        extras TEXT,
+        source_chapter_id INTEGER,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_ce_rels_project ON ai_kg_character_event_relations(project_id)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_kg_character_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        source_entity_id TEXT NOT NULL,
+        target_entity_id TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        properties TEXT,
+        extras TEXT,
+        source_chapter_id INTEGER,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_cc_rels_project ON ai_kg_character_relations(project_id)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_kg_event_relations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        source_entity_id TEXT NOT NULL,
+        target_entity_id TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        properties TEXT,
+        extras TEXT,
+        source_chapter_id INTEGER,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_ee_rels_project ON ai_kg_event_relations(project_id)",
 ]
 
 
@@ -1399,4 +1551,751 @@ async def delete_suggestions_by_novel(novel_id: int) -> int:
         )
         await db.commit()
     return int(cur.rowcount or 0)
+
+
+# ============================================================================
+# AI 小说创作 (AI Creation) CRUD
+# ============================================================================
+
+
+def _decode_ai_json(raw: Any) -> Any:
+    """AI 创作模块通用 JSON 解码 (initial_concepts / style_pref / kg_diff / critic_report)."""
+    if not raw:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _row_to_ai_project(row: aiosqlite.Row) -> Dict[str, Any]:
+    data = dict(row)
+    data["initial_concepts"] = _decode_ai_json(data.get("initial_concepts")) or []
+    data["style_pref"] = _decode_ai_json(data.get("style_pref")) or {}
+    return data
+
+
+def _row_to_ai_chapter(row: aiosqlite.Row) -> Dict[str, Any]:
+    return dict(row)
+
+
+def _row_to_ai_variant(row: aiosqlite.Row) -> Dict[str, Any]:
+    data = dict(row)
+    data["kg_diff"] = _decode_ai_json(data.get("kg_diff")) or {}
+    data["critic_report"] = _decode_ai_json(data.get("critic_report")) or {}
+    return data
+
+
+# --- ai_projects ----------------------------------------------------------
+
+
+async def create_ai_project(
+    *,
+    title: str,
+    genre: str = "",
+    worldview: str = "",
+    outline: str = "",
+    initial_concepts: Optional[List[Dict[str, Any]]] = None,
+    style_pref: Optional[Dict[str, Any]] = None,
+    model_id: Optional[int] = None,
+) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            INSERT INTO ai_projects
+                (title, genre, worldview, outline, initial_concepts,
+                 style_pref, model_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                title.strip(),
+                genre.strip(),
+                worldview.strip(),
+                outline.strip(),
+                json.dumps(initial_concepts or [], ensure_ascii=False),
+                json.dumps(style_pref or {}, ensure_ascii=False),
+                model_id,
+            ),
+        )
+        await db.commit()
+    return int(cur.lastrowid or 0)
+
+
+async def list_ai_projects() -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM ai_projects ORDER BY created_at DESC, id DESC"
+        )
+        return [_row_to_ai_project(r) for r in await cur.fetchall()]
+
+
+async def get_ai_project(project_id: int) -> Optional[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM ai_projects WHERE id = ?", (project_id,)
+        )
+        row = await cur.fetchone()
+        return _row_to_ai_project(row) if row else None
+
+
+async def update_ai_project(
+    project_id: int,
+    *,
+    title: Optional[str] = None,
+    genre: Optional[str] = None,
+    worldview: Optional[str] = None,
+    outline: Optional[str] = None,
+    initial_concepts: Optional[List[Dict[str, Any]]] = None,
+    style_pref: Optional[Dict[str, Any]] = None,
+    model_id: Optional[int] = None,
+    current_chapter_no: Optional[int] = None,
+    status: Optional[str] = None,
+) -> bool:
+    sets: List[str] = []
+    values: List[Any] = []
+    if title is not None:
+        sets.append("title = ?")
+        values.append(title.strip())
+    if genre is not None:
+        sets.append("genre = ?")
+        values.append(genre.strip())
+    if worldview is not None:
+        sets.append("worldview = ?")
+        values.append(worldview.strip())
+    if outline is not None:
+        sets.append("outline = ?")
+        values.append(outline.strip())
+    if initial_concepts is not None:
+        sets.append("initial_concepts = ?")
+        values.append(json.dumps(initial_concepts, ensure_ascii=False))
+    if style_pref is not None:
+        sets.append("style_pref = ?")
+        values.append(json.dumps(style_pref, ensure_ascii=False))
+    if model_id is not None:
+        sets.append("model_id = ?")
+        values.append(model_id)
+    if current_chapter_no is not None:
+        sets.append("current_chapter_no = ?")
+        values.append(int(current_chapter_no))
+    if status is not None:
+        sets.append("status = ?")
+        values.append(status)
+    if not sets:
+        return False
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    values.append(project_id)
+    async with get_db() as db:
+        cur = await db.execute(
+            f"UPDATE ai_projects SET {', '.join(sets)} WHERE id = ?",
+            values,
+        )
+        await db.commit()
+    return cur.rowcount > 0
+
+
+async def delete_ai_project(project_id: int) -> bool:
+    """级联删除 (依赖外键 ON DELETE CASCADE)."""
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute("DELETE FROM ai_projects WHERE id = ?", (project_id,))
+        await db.commit()
+    return cur.rowcount > 0
+
+
+# --- ai_chapters ----------------------------------------------------------
+
+
+async def create_ai_chapter(
+    *,
+    project_id: int,
+    chapter_no: int,
+    title: str = "",
+    user_intent: str = "",
+    status: str = "draft",
+) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            INSERT INTO ai_chapters
+                (project_id, chapter_no, title, user_intent, status)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (project_id, chapter_no, title.strip(), user_intent.strip(), status),
+        )
+        await db.commit()
+    return int(cur.lastrowid or 0)
+
+
+async def get_ai_chapter(chapter_id: int) -> Optional[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM ai_chapters WHERE id = ?", (chapter_id,)
+        )
+        row = await cur.fetchone()
+        return _row_to_ai_chapter(row) if row else None
+
+
+async def list_ai_chapters(project_id: int) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM ai_chapters WHERE project_id = ? ORDER BY chapter_no ASC",
+            (project_id,),
+        )
+        return [_row_to_ai_chapter(r) for r in await cur.fetchall()]
+
+
+async def update_ai_chapter(
+    chapter_id: int,
+    *,
+    title: Optional[str] = None,
+    user_intent: Optional[str] = None,
+    status: Optional[str] = None,
+    selected_variant_id: Optional[int] = None,
+    final_content: Optional[str] = None,
+    word_count: Optional[int] = None,
+    kg_extracted: Optional[int] = None,
+    confirmed_at: Optional[str] = None,
+) -> bool:
+    sets: List[str] = []
+    values: List[Any] = []
+    if title is not None:
+        sets.append("title = ?")
+        values.append(title.strip())
+    if user_intent is not None:
+        sets.append("user_intent = ?")
+        values.append(user_intent.strip())
+    if status is not None:
+        sets.append("status = ?")
+        values.append(status)
+    if selected_variant_id is not None:
+        sets.append("selected_variant_id = ?")
+        values.append(int(selected_variant_id))
+    if final_content is not None:
+        sets.append("final_content = ?")
+        values.append(final_content)
+    if word_count is not None:
+        sets.append("word_count = ?")
+        values.append(int(word_count))
+    if kg_extracted is not None:
+        sets.append("kg_extracted = ?")
+        values.append(int(kg_extracted))
+    if confirmed_at is not None:
+        sets.append("confirmed_at = ?")
+        values.append(confirmed_at)
+    if not sets:
+        return False
+    sets.append("updated_at = CURRENT_TIMESTAMP")
+    values.append(chapter_id)
+    async with get_db() as db:
+        cur = await db.execute(
+            f"UPDATE ai_chapters SET {', '.join(sets)} WHERE id = ?",
+            values,
+        )
+        await db.commit()
+    return cur.rowcount > 0
+
+
+async def delete_ai_chapter(chapter_id: int) -> bool:
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        cur = await db.execute(
+            "DELETE FROM ai_chapters WHERE id = ?", (chapter_id,)
+        )
+        await db.commit()
+    return cur.rowcount > 0
+
+
+# --- ai_chapter_variants --------------------------------------------------
+
+
+async def insert_ai_variant(
+    *,
+    chapter_id: int,
+    variant_index: int,
+    planner_direction: str = "",
+    content: str = "",
+    focus_summary: str = "",
+    kg_diff: Optional[Dict[str, Any]] = None,
+    critic_report: Optional[Dict[str, Any]] = None,
+    score: float = 0.0,
+    model_id: Optional[int] = None,
+) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            INSERT INTO ai_chapter_variants
+                (chapter_id, variant_index, planner_direction, content,
+                 focus_summary, kg_diff, critic_report, score, model_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chapter_id,
+                int(variant_index),
+                planner_direction.strip(),
+                content,
+                focus_summary.strip(),
+                json.dumps(kg_diff or {}, ensure_ascii=False),
+                json.dumps(critic_report or {}, ensure_ascii=False),
+                float(score),
+                model_id,
+            ),
+        )
+        await db.commit()
+    return int(cur.lastrowid or 0)
+
+
+async def list_ai_variants(chapter_id: int) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM ai_chapter_variants WHERE chapter_id = ? "
+            "ORDER BY variant_index ASC",
+            (chapter_id,),
+        )
+        return [_row_to_ai_variant(r) for r in await cur.fetchall()]
+
+
+async def get_ai_variant(variant_id: int) -> Optional[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM ai_chapter_variants WHERE id = ?", (variant_id,)
+        )
+        row = await cur.fetchone()
+        return _row_to_ai_variant(row) if row else None
+
+
+async def update_ai_variant(
+    variant_id: int,
+    *,
+    critic_report: Optional[Dict[str, Any]] = None,
+    score: Optional[float] = None,
+    kg_diff: Optional[Dict[str, Any]] = None,
+) -> bool:
+    sets: List[str] = []
+    values: List[Any] = []
+    if critic_report is not None:
+        sets.append("critic_report = ?")
+        values.append(json.dumps(critic_report, ensure_ascii=False))
+    if score is not None:
+        sets.append("score = ?")
+        values.append(float(score))
+    if kg_diff is not None:
+        sets.append("kg_diff = ?")
+        values.append(json.dumps(kg_diff, ensure_ascii=False))
+    if not sets:
+        return False
+    values.append(variant_id)
+    async with get_db() as db:
+        cur = await db.execute(
+            f"UPDATE ai_chapter_variants SET {', '.join(sets)} WHERE id = ?",
+            values,
+        )
+        await db.commit()
+    return cur.rowcount > 0
+
+
+async def delete_variants_by_chapter(chapter_id: int) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM ai_chapter_variants WHERE chapter_id = ?",
+            (chapter_id,),
+        )
+        await db.commit()
+    return int(cur.rowcount or 0)
+
+
+# --- AI 创作专用知识图谱 --------------------------------------------------
+
+
+async def get_ai_knowledge_graph(project_id: int) -> Dict[str, List[Dict[str, Any]]]:
+    """返回项目级 KG (独立 5 表), 结构与现有 get_knowledge_graph 一致."""
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT id, project_id, entity_id, name, attributes,
+                   source_chapter_id, model_id, extras, created_at, updated_at
+            FROM ai_kg_characters WHERE project_id = ? ORDER BY entity_id
+            """,
+            (project_id,),
+        )
+        characters: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["attributes"] = _decode_attributes(row.get("attributes"))
+            row["extras"] = _decode_extras(row.get("extras"))
+            characters.append(row)
+
+        cur = await db.execute(
+            """
+            SELECT id, project_id, entity_id, name, attributes,
+                   source_chapter_id, model_id, extras, created_at, updated_at
+            FROM ai_kg_events WHERE project_id = ? ORDER BY entity_id
+            """,
+            (project_id,),
+        )
+        events: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["attributes"] = _decode_attributes(row.get("attributes"))
+            row["extras"] = _decode_extras(row.get("extras"))
+            events.append(row)
+
+        cur = await db.execute(
+            """
+            SELECT id, project_id, source_entity_id, target_entity_id,
+                   relation, role, action, properties, extras, source_chapter_id
+            FROM ai_kg_character_event_relations WHERE project_id = ?
+            """,
+            (project_id,),
+        )
+        ce_relations: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["properties"] = _decode_attributes(row.get("properties"))
+            row["extras"] = _decode_extras(row.get("extras"))
+            ce_relations.append(row)
+
+        cur = await db.execute(
+            """
+            SELECT id, project_id, source_entity_id, target_entity_id,
+                   relation, properties, extras, source_chapter_id
+            FROM ai_kg_character_relations WHERE project_id = ?
+            """,
+            (project_id,),
+        )
+        cc_relations: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["properties"] = _decode_attributes(row.get("properties"))
+            row["extras"] = _decode_extras(row.get("extras"))
+            cc_relations.append(row)
+
+        cur = await db.execute(
+            """
+            SELECT id, project_id, source_entity_id, target_entity_id,
+                   relation, properties, extras, source_chapter_id
+            FROM ai_kg_event_relations WHERE project_id = ?
+            """,
+            (project_id,),
+        )
+        ee_relations: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["properties"] = _decode_attributes(row.get("properties"))
+            row["extras"] = _decode_extras(row.get("extras"))
+            ee_relations.append(row)
+
+    return {
+        "characters": characters,
+        "events": events,
+        "character_event_relations": ce_relations,
+        "character_relations": cc_relations,
+        "event_relations": ee_relations,
+    }
+
+
+async def upsert_ai_kg_from_extraction(
+    project_id: int,
+    *,
+    source_chapter_id: Optional[int],
+    characters: List[Dict[str, Any]],
+    events: List[Dict[str, Any]],
+    character_event_relations: List[Dict[str, Any]],
+    character_relations: List[Dict[str, Any]],
+    event_relations: List[Dict[str, Any]],
+    model_id: Optional[int] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """根据单章节抽取结果, UPSERT 到项目级 KG (按 entity_id 同名合并属性).
+
+    合并策略:
+    - 已存在 (project_id, entity_id): 合并 attributes (后者覆盖前者), extras 替换, source_chapter_id 追加到 extras
+    - 不存在: 插入新行
+    - 关系表: 同 source/target/relation 三元组视为同一条, 重复则跳过
+    """
+    stored: Dict[str, List[Dict[str, Any]]] = {
+        "characters": [],
+        "events": [],
+        "character_event_relations": [],
+        "character_relations": [],
+        "event_relations": [],
+    }
+
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+
+        # ---- characters ----
+        for c in characters:
+            entity_id = str(c.get("entity_id") or c.get("id") or "").strip()
+            if not entity_id:
+                continue
+            cur = await db.execute(
+                "SELECT id, attributes FROM ai_kg_characters "
+                "WHERE project_id = ? AND entity_id = ?",
+                (project_id, entity_id),
+            )
+            row = await cur.fetchone()
+            merged_attrs = {**(c.get("attributes") or {})}
+            extras = _build_entity_extras(c)
+            if row:
+                old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
+                merged_attrs = {**old_attrs, **merged_attrs}
+                extras["source_chapter_ids"] = list(
+                    set((extras.get("source_chapter_ids") or []) + ([source_chapter_id] if source_chapter_id else []))
+                )
+                await db.execute(
+                    """
+                    UPDATE ai_kg_characters
+                    SET name = ?, attributes = ?, extras = ?,
+                        source_chapter_id = COALESCE(?, source_chapter_id),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        str(c.get("name", "")).strip()[:200] or entity_id,
+                        _encode_attributes(merged_attrs),
+                        _encode_extras(extras),
+                        source_chapter_id,
+                        row["id"],
+                    ),
+                )
+                stored["characters"].append({
+                    "id": row["id"], "project_id": project_id, "entity_id": entity_id,
+                    "name": c.get("name", ""), "attributes": merged_attrs,
+                    "source_chapter_id": source_chapter_id, "extras": extras,
+                })
+            else:
+                if source_chapter_id:
+                    extras["source_chapter_ids"] = [source_chapter_id]
+                cur = await db.execute(
+                    """
+                    INSERT INTO ai_kg_characters
+                        (project_id, entity_id, name, attributes,
+                         source_chapter_id, model_id, extras)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id, entity_id,
+                        str(c.get("name", "")).strip()[:200] or entity_id,
+                        _encode_attributes(merged_attrs),
+                        source_chapter_id, model_id,
+                        _encode_extras(extras),
+                    ),
+                )
+                stored["characters"].append({
+                    "id": cur.lastrowid, "project_id": project_id, "entity_id": entity_id,
+                    "name": c.get("name", ""), "attributes": merged_attrs,
+                    "source_chapter_id": source_chapter_id, "extras": extras,
+                })
+
+        # ---- events ----
+        for e in events:
+            entity_id = str(e.get("entity_id") or e.get("id") or "").strip()
+            if not entity_id:
+                continue
+            cur = await db.execute(
+                "SELECT id, attributes FROM ai_kg_events "
+                "WHERE project_id = ? AND entity_id = ?",
+                (project_id, entity_id),
+            )
+            row = await cur.fetchone()
+            merged_attrs = {**(e.get("attributes") or {})}
+            extras = _build_entity_extras(e)
+            if row:
+                old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
+                merged_attrs = {**old_attrs, **merged_attrs}
+                extras["source_chapter_ids"] = list(
+                    set((extras.get("source_chapter_ids") or []) + ([source_chapter_id] if source_chapter_id else []))
+                )
+                await db.execute(
+                    """
+                    UPDATE ai_kg_events
+                    SET name = ?, attributes = ?, extras = ?,
+                        source_chapter_id = COALESCE(?, source_chapter_id),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (
+                        str(e.get("name", "")).strip()[:200] or entity_id,
+                        _encode_attributes(merged_attrs),
+                        _encode_extras(extras),
+                        source_chapter_id,
+                        row["id"],
+                    ),
+                )
+                stored["events"].append({
+                    "id": row["id"], "project_id": project_id, "entity_id": entity_id,
+                    "name": e.get("name", ""), "attributes": merged_attrs,
+                    "source_chapter_id": source_chapter_id, "extras": extras,
+                })
+            else:
+                if source_chapter_id:
+                    extras["source_chapter_ids"] = [source_chapter_id]
+                cur = await db.execute(
+                    """
+                    INSERT INTO ai_kg_events
+                        (project_id, entity_id, name, attributes,
+                         source_chapter_id, model_id, extras)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id, entity_id,
+                        str(e.get("name", "")).strip()[:200] or entity_id,
+                        _encode_attributes(merged_attrs),
+                        source_chapter_id, model_id,
+                        _encode_extras(extras),
+                    ),
+                )
+                stored["events"].append({
+                    "id": cur.lastrowid, "project_id": project_id, "entity_id": entity_id,
+                    "name": e.get("name", ""), "attributes": merged_attrs,
+                    "source_chapter_id": source_chapter_id, "extras": extras,
+                })
+
+        # ---- relations: 去重插入 ----
+        async def _insert_rel(
+            table: str, source: str, target: str,
+            relation: str, extras_payload: Dict[str, Any], **extra
+        ) -> Optional[Dict[str, Any]]:
+            cur = await db.execute(
+                f"SELECT id FROM {table} WHERE project_id = ? "
+                f"AND source_entity_id = ? AND target_entity_id = ? AND relation = ?",
+                (project_id, source, target, relation),
+            )
+            if await cur.fetchone():
+                return None
+            extras = _build_relation_extras(extras_payload)
+            if source_chapter_id:
+                extras["source_chapter_ids"] = list(
+                    set((extras.get("source_chapter_ids") or []) + [source_chapter_id])
+                )
+            cols = ["project_id", "source_entity_id", "target_entity_id",
+                    "relation", "source_chapter_id", "extras"]
+            vals: List[Any] = [project_id, source, target, relation,
+                               source_chapter_id, _encode_extras(extras)]
+            for k, v in extra.items():
+                cols.append(k)
+                vals.append(v)
+            placeholders = ", ".join(["?"] * len(vals))
+            cur = await db.execute(
+                f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+            return {
+                "id": cur.lastrowid, "project_id": project_id,
+                "source_entity_id": source, "target_entity_id": target,
+                "relation": relation, **extra, "source_chapter_id": source_chapter_id,
+                "extras": extras,
+            }
+
+        for r in character_event_relations:
+            src = str(r.get("source") or r.get("source_entity_id") or "").strip()
+            tgt = str(r.get("target") or r.get("target_entity_id") or "").strip()
+            if not src or not tgt:
+                continue
+            stored_row = await _insert_rel(
+                "ai_kg_character_event_relations", src, tgt,
+                str(r.get("relation") or "PARTICIPATES_IN").strip() or "PARTICIPATES_IN",
+                r,
+                role=r.get("role") or None,
+                action=r.get("action") or None,
+                properties=_encode_attributes(
+                    r.get("properties") if isinstance(r.get("properties"), dict) else {}
+                ),
+            )
+            if stored_row:
+                stored_row["properties"] = r.get("properties") or {}
+                stored["character_event_relations"].append(stored_row)
+
+        for r in character_relations:
+            src = str(r.get("source") or r.get("source_entity_id") or "").strip()
+            tgt = str(r.get("target") or r.get("target_entity_id") or "").strip()
+            if not src or not tgt:
+                continue
+            stored_row = await _insert_rel(
+                "ai_kg_character_relations", src, tgt,
+                str(r.get("relation") or "").strip() or "关联",
+                r,
+                properties=_encode_attributes(
+                    r.get("properties") if isinstance(r.get("properties"), dict) else {}
+                ),
+            )
+            if stored_row:
+                stored_row["properties"] = r.get("properties") or {}
+                stored["character_relations"].append(stored_row)
+
+        for r in event_relations:
+            src = str(r.get("source") or r.get("source_entity_id") or "").strip()
+            tgt = str(r.get("target") or r.get("target_entity_id") or "").strip()
+            if not src or not tgt:
+                continue
+            stored_row = await _insert_rel(
+                "ai_kg_event_relations", src, tgt,
+                str(r.get("relation") or "").strip() or "关联",
+                r,
+                properties=_encode_attributes(
+                    r.get("properties") if isinstance(r.get("properties"), dict) else {}
+                ),
+            )
+            if stored_row:
+                stored_row["properties"] = r.get("properties") or {}
+                stored["event_relations"].append(stored_row)
+
+        await db.commit()
+    return stored
+
+
+async def delete_ai_knowledge_graph(project_id: int) -> Dict[str, int]:
+    """原子清空项目级 KG."""
+    counts: Dict[str, int] = {}
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        for table in (
+            "ai_kg_character_event_relations",
+            "ai_kg_character_relations",
+            "ai_kg_event_relations",
+            "ai_kg_events",
+            "ai_kg_characters",
+        ):
+            cur = await db.execute(
+                f"DELETE FROM {table} WHERE project_id = ?", (project_id,)
+            )
+            counts[table] = cur.rowcount or 0
+        await db.commit()
+    return counts
+
+
+async def get_ai_kg_stats(project_id: int) -> Dict[str, int]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM ai_kg_characters WHERE project_id = ?",
+            (project_id,),
+        )
+        char_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM ai_kg_events WHERE project_id = ?",
+            (project_id,),
+        )
+        evt_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM ai_kg_character_event_relations WHERE project_id = ?",
+            (project_id,),
+        )
+        ce_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM ai_kg_character_relations WHERE project_id = ?",
+            (project_id,),
+        )
+        cc_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM ai_kg_event_relations WHERE project_id = ?",
+            (project_id,),
+        )
+        ee_count = (await cur.fetchone())[0]
+    return {
+        "characters": char_count, "events": evt_count,
+        "participations": ce_count, "character_relations": cc_count,
+        "event_relations": ee_count,
+    }
+
 

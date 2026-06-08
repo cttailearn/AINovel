@@ -431,4 +431,50 @@ export const api = {
     history: (chapterId, options) =>
       apiRequest(`/enrichment/chapters/${chapterId}/history`, options),
   },
+  creation: {
+    // 项目
+    listProjects: (options) => apiRequest('/creation/projects', options),
+    createProject: (payload, options) =>
+      apiRequest('/creation/projects', { method: 'POST', body: payload, ...options }),
+    getProject: (id, options) =>
+      apiRequest(`/creation/projects/${id}`, options),
+    updateProject: (id, payload, options) =>
+      apiRequest(`/creation/projects/${id}`, { method: 'PUT', body: payload, ...options }),
+    deleteProject: (id, options) =>
+      apiRequest(`/creation/projects/${id}`, { method: 'DELETE', ...options }),
+    // 知识图谱
+    getKG: (projectId, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg`, options),
+    seedKG: (projectId, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/seed`, {
+        method: 'POST', ...options,
+      }),
+    clearKG: (projectId, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg`, {
+        method: 'DELETE', ...options,
+      }),
+    // 章节
+    listChapters: (projectId, options) =>
+      apiRequest(`/creation/projects/${projectId}/chapters`, options),
+    getChapter: (chapterId, options) =>
+      apiRequest(`/creation/chapters/${chapterId}`, options),
+    selectVariant: (chapterId, variantId, options) =>
+      apiRequest(`/creation/chapters/${chapterId}/select`, {
+        method: 'POST', body: { variant_id: variantId }, ...options,
+      }),
+    updateContent: (chapterId, content, options) =>
+      apiRequest(`/creation/chapters/${chapterId}/content`, {
+        method: 'PUT', body: { content }, ...options,
+      }),
+    confirmChapter: (chapterId, options) =>
+      apiRequest(`/creation/chapters/${chapterId}/confirm`, {
+        method: 'POST', ...options,
+      }),
+    // 生成 (SSE)
+    generate: (projectId, payload, { onEvent, signal } = {}) =>
+      postStream(`/creation/projects/${projectId}/chapters/generate`, payload, {
+        onEvent,
+        signal,
+      }),
+  },
 };
