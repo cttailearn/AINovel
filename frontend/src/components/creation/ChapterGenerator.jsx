@@ -1,5 +1,6 @@
 // 单章节生成: 用户输入意图 → SSE 推送 Planner / Writer / Critic 进度
-import { useEffect, useRef, useState } from 'react';
+// 支持 regenMode: 预填标题, 显示"重新生成第 N 章", 提供取消按钮
+import { useEffect, useState } from 'react';
 
 const STAGE_LABELS = {
   start: '准备',
@@ -27,24 +28,39 @@ export function ChapterGenerator({
   nextChapterNo,
   onGenerate,
   onCancel,
+  onCancelRegen,
   generating = false,
-  progress = null, // { stage, variants: {0: {score, content, ...}, ...}, error }
+  progress = null,
+  regenMode = false,
+  initialTitle = '',
 }) {
   const [userIntent, setUserIntent] = useState('');
-  const [title, setTitle] = useState('');
+  const [title, setTitle] = useState(initialTitle || '');
 
+  // regenMode 切换时, 重置 title 为 initialTitle
   useEffect(() => {
-    if (!generating) {
-      // 完成后保留输入, 方便用户再生成
+    if (regenMode) {
+      setTitle(initialTitle || '');
+    } else {
+      setTitle('');
     }
-  }, [generating]);
+  }, [regenMode, initialTitle]);
 
   if (!project) return null;
+
+  const submitLabel = regenMode
+    ? `↻ 重新生成第 ${nextChapterNo} 章`
+    : `生成第 ${nextChapterNo} 章`;
 
   return (
     <div className="creation-generator">
       {!generating ? (
         <div className="creation-generator-form">
+          {regenMode && (
+            <div className="creation-regen-hint small">
+              重新生成会覆盖当前章节的所有变体. 你可以填入新的需求(可选)或留空沿用.
+            </div>
+          )}
           <div className="form-row">
             <label className="form-label">本章标题 (可选)</label>
             <input
@@ -57,17 +73,34 @@ export function ChapterGenerator({
             />
           </div>
           <div className="form-row">
-            <label className="form-label">本轮意图 / 偏好 (可选)</label>
+            <label className="form-label">
+              本轮意图 / 偏好 (可选)
+              {regenMode && <span className="muted"> · 留空则沿用原意图</span>}
+            </label>
             <textarea
               className="form-input form-textarea"
               rows={3}
               value={userIntent}
               onChange={(e) => setUserIntent(e.target.value)}
-              placeholder="如: 这一章主角要遇到红衣女, 推动身世线, 制造 1 处悬念..."
+              placeholder={
+                regenMode
+                  ? '可填入新的需求 / 调整方向, 留空使用模型自动沿用'
+                  : '如: 这一章主角要遇到红衣女, 推动身世线, 制造 1 处悬念...'
+              }
               maxLength={4000}
             />
           </div>
           <div className="form-actions">
+            {regenMode && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={onCancelRegen}
+                disabled={generating}
+              >
+                取消
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-primary"
@@ -80,7 +113,7 @@ export function ChapterGenerator({
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" strokeWidth="1.6">
                 <path d="M5 12l5 5L20 7" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
-              生成第 {nextChapterNo} 章
+              {submitLabel}
             </button>
           </div>
         </div>
@@ -182,3 +215,4 @@ export function ChapterGenerator({
     </div>
   );
 }
+

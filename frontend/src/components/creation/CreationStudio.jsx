@@ -1,17 +1,76 @@
-// AI 小说创作 - 主壳
-// 左侧: 项目列表 + 新建按钮
-// 右侧: 项目详情 (设定 / 章节列表 / 章节生成 / 三选一 / 编辑 / KG 预览)
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// AI 小说创作 - Notion 文档式主壳
+// 整体布局: 顶栏 (项目切换 + 流程进度 + 操作) + 三栏 (章节大纲 | 主工作区 | 设定/参考)
+// 全屏高度 100vh, 不需要页面滚动
+// 入口界面: ProjectListView (项目网格) — NotionWorkspace (项目详情)
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiError, api } from '../../api/client.js';
 import { useToast } from '../Toast/ToastProvider.jsx';
 import { ProjectForm } from './ProjectForm.jsx';
-import { ChapterList } from './ChapterList.jsx';
+import { ProjectIntakeWizard } from './ProjectIntakeWizard.jsx';
 import { ChapterGenerator } from './ChapterGenerator.jsx';
 import { VariantCards } from './VariantCards.jsx';
 import { VariantEditor } from './VariantEditor.jsx';
 import { ProjectKGPreview } from './ProjectKGPreview.jsx';
+import { KGGraphView } from './KGGraphView.jsx';
 import './creation.css';
 
+// ============================================================
+// 流程进度常量
+// ============================================================
+const FLOW_STEPS = [
+  { key: 'intent',   label: '输入意图' },
+  { key: 'generate', label: '生成候选' },
+  { key: 'select',   label: '选择版本' },
+  { key: 'edit',     label: '编辑正文' },
+  { key: 'confirm',  label: '入图谱' },
+];
+
+function getCurrentStep(chapter, generating) {
+  if (generating) return 'generate';
+  if (!chapter) return 'intent';
+  switch (chapter.status) {
+    case 'generating': return 'generate';
+    case 'generated':  return 'select';
+    case 'selected':
+    case 'edited':     return 'edit';
+    case 'confirmed':  return 'confirm';
+    default:           return 'intent';
+  }
+}
+
+const SUB_STAGE_PROGRESS = {
+  start: 0.05,
+  planner_done: 0.30,
+  writer_0_done: 0.45,
+  writer_1_done: 0.60,
+  writer_2_done: 0.75,
+  critic_0_done: 0.85,
+  critic_1_done: 0.92,
+  critic_2_done: 0.97,
+  done: 1.0,
+};
+
+function getGenerationProgressPercent(progress) {
+  if (!progress || !progress.stage) return 0;
+  if (progress.error) return 0;
+  return SUB_STAGE_PROGRESS[progress.stage] ?? 0;
+}
+
+function formatDateTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch (e) {
+    return '';
+  }
+}
+
+// ============================================================
+// 主组件
+// ============================================================
 export function CreationStudio({ models = [], topSearch = '' }) {
   const toast = useToast();
   const [projects, setProjects] = useState([]);
@@ -28,11 +87,11 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   const [chapterLoading, setChapterLoading] = useState(false);
 
   const [generating, setGenerating] = useState(false);
-  const [genProgress, setGenProgress] = useState(null); // { stage, variants, error }
-  const genAbortRef = useRef(null);
+  const [genProgress, setGenProgress] = useState(null);
 
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [kgRefreshKey, setKgRefreshKey] = useState(0);
 
@@ -72,7 +131,6 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     try {
       const data = await api.creation.getProject(id);
       setProjectDetail(data);
-      // 默认选中最后一章 (最近的进度)
       const lastCh = (data.chapters || [])[data.chapters.length - 1];
       if (lastCh) {
         setActiveChapterId(lastCh.id);
@@ -188,7 +246,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   const handleGenerate = async ({ user_intent, title, chapter_no }) => {
     if (!activeProjectId) return;
     setGenerating(true);
-    setGenProgress({ stage: 'start', variants: {} });
+    setGenProgress({ stage: 'start', variants: {}, autoTitle: null });
     try {
       await api.creation.generate(
         activeProjectId,
@@ -197,15 +255,27 @@ export function CreationStudio({ models = [], topSearch = '' }) {
           onEvent: (ev) => {
             const data = ev.data || {};
             setGenProgress((prev) => {
-              const next = { ...(prev || { stage: 'start', variants: {} }) };
+              const next = { ...(prev || { stage: 'start', variants: {}, autoTitle: null }) };
               if (data.event === 'start') {
                 next.stage = 'start';
                 next.chapter_id = data.chapter_id;
                 next.variants = {};
+                if (data.title) {
+                  next.userTitle = data.title;
+                }
               } else if (data.event === 'planner_done') {
                 next.stage = 'planner_done';
                 next.directions = data.directions || [];
                 next.variant_ids = data.variant_ids || [];
+              } else if (data.event === 'title_generated') {
+                // 用户没填标题时, AI 自动生成, 这里更新主区显示的标题
+                next.autoTitle = data.title;
+                if (data.auto && data.chapter_id) {
+                  // 同步更新当前章节 title
+                  setChapterDetail((cd) =>
+                    cd && cd.id === data.chapter_id ? { ...cd, title: data.title } : cd
+                  );
+                }
               } else if (data.event?.startsWith('writer_')) {
                 const idx = Number(data.event.split('_')[1]);
                 next.variants = {
@@ -228,6 +298,12 @@ export function CreationStudio({ models = [], topSearch = '' }) {
               } else if (data.event === 'done') {
                 next.stage = 'done';
                 next.chapter_id = data.chapter_id;
+                if (data.title) {
+                  next.autoTitle = data.title;
+                  setChapterDetail((cd) =>
+                    cd && cd.id === data.chapter_id ? { ...cd, title: data.title } : cd
+                  );
+                }
               } else if (data.event === 'error') {
                 next.stage = 'error';
                 next.error = data.message || '生成失败';
@@ -238,7 +314,6 @@ export function CreationStudio({ models = [], topSearch = '' }) {
         }
       );
       toast.success('章节生成完成');
-      // 重新加载详情, 让用户看到三选一卡片
       await loadProjectDetail(activeProjectId);
       setGenProgress(null);
     } catch (e) {
@@ -262,7 +337,6 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   };
 
   const handleEditVariant = (variant) => {
-    // 直接选中 + 进入编辑器
     if (chapterDetail?.selected_variant_id !== variant.id) {
       handleSelectVariant(variant.id);
     }
@@ -297,269 +371,679 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     }
   };
 
+  // ---- 章节管理 (导出 / 删除 / 重新生成) ----
+  const handleExportChapter = (chapter) => {
+    if (!chapter) return;
+    const url = api.creation.exportChapterUrl(chapter.id, 'txt');
+    const a = document.createElement('a');
+    a.href = url;
+    a.style.display = 'none';
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 0);
+  };
+
+  const handleDeleteChapter = async (chapter) => {
+    if (!chapter) return;
+    if (!confirm(
+      `确认删除第 ${chapter.chapter_no} 章「${chapter.title || '(未命名)'}」?\n`
+      + `所有变体将被一并删除, 不可恢复.`
+    )) return;
+    setDeleting(true);
+    try {
+      await api.creation.deleteChapter(chapter.id);
+      toast.success('已删除');
+      if (activeChapterId === chapter.id) {
+        setActiveChapterId(null);
+        setChapterDetail(null);
+      }
+      await loadProjectDetail(activeProjectId);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : '删除失败');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // 重新生成: 复用 handleGenerate (后端会按 chapter_no 覆盖)
+  const [regenOf, setRegenOf] = useState(null);
+  const handleRegenerateChapter = (chapter) => {
+    if (!chapter) return;
+    setRegenOf(chapter);
+    setActiveChapterId(chapter.id);
+    setChapterDetail(null);
+  };
+
   // ============================================================
   // 渲染
   // ============================================================
+  if (creatingProject) {
+    return (
+      <div className="creation-studio">
+        <div className="creation-main-section">
+          <h2>新建创作项目</h2>
+          <ProjectIntakeWizard
+            models={models}
+            onSubmit={handleCreateProject}
+            onCancel={() => setCreatingProject(false)}
+            submitting={submittingProject}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (!activeProjectId || !projectDetail) {
+    return (
+      <ProjectListView
+        projects={filteredProjects}
+        loading={projectsLoading}
+        onSelectProject={(id) => { setActiveProjectId(id); setRegenOf(null); }}
+        onCreateNew={() => setCreatingProject(true)}
+      />
+    );
+  }
+
   return (
-    <div className="creation-studio">
-      {/* 左侧: 项目列表 */}
-      <aside className="creation-sidebar">
-        <div className="creation-sidebar-head">
-          <h3>创作项目</h3>
+    <NotionWorkspace
+      activeProjectId={activeProjectId}
+      onSelectProject={(id) => { setActiveProjectId(id); setRegenOf(null); }}
+      onCreateNew={() => setCreatingProject(true)}
+      onBackToProjects={() => {
+        setActiveProjectId(null);
+        setProjectDetail(null);
+        setActiveChapterId(null);
+        setChapterDetail(null);
+        setRegenOf(null);
+        setEditingProject(false);
+      }}
+      projectDetail={projectDetail}
+      chapterDetail={chapterDetail}
+      chapterLoading={chapterLoading}
+      generating={generating}
+      genProgress={genProgress}
+      saving={saving}
+      confirming={confirming}
+      deleting={deleting}
+      regenOf={regenOf}
+      setRegenOf={setRegenOf}
+      kgRefreshKey={kgRefreshKey}
+      editingProject={editingProject}
+      submittingProject={submittingProject}
+      setEditingProject={setEditingProject}
+      handleUpdateProject={handleUpdateProject}
+      handleDeleteProject={handleDeleteProject}
+      handleSeedKG={handleSeedKG}
+      handleClearKG={handleClearKG}
+      setActiveChapterId={setActiveChapterId}
+      handleGenerate={handleGenerate}
+      handleSelectVariant={handleSelectVariant}
+      handleEditVariant={handleEditVariant}
+      handleSaveContent={handleSaveContent}
+      handleConfirmChapter={handleConfirmChapter}
+      handleExportChapter={handleExportChapter}
+      handleDeleteChapter={handleDeleteChapter}
+      handleRegenerateChapter={handleRegenerateChapter}
+    />
+  );
+}
+
+// ============================================================
+// 入口界面: 项目列表视图 (网格卡片)
+// ============================================================
+function ProjectListView({ projects = [], loading = false, onSelectProject, onCreateNew }) {
+  const [topSearch, setTopSearch] = useState('');
+  const filtered = useMemo(() => {
+    if (!topSearch.trim()) return projects;
+    const q = topSearch.toLowerCase();
+    return projects.filter(
+      (p) =>
+        (p.title || '').toLowerCase().includes(q) ||
+        (p.genre || '').toLowerCase().includes(q) ||
+        (p.outline || '').toLowerCase().includes(q)
+    );
+  }, [projects, topSearch]);
+
+  return (
+    <div className="creation-studio creation-project-list-view">
+      <header className="creation-topbar">
+        <div className="creation-topbar-left">
+          <span className="creation-topbar-title">📖 AI 小说创作 · 我的项目</span>
+        </div>
+        <div className="creation-topbar-center">
+          <input
+            type="text"
+            className="form-input creation-topbar-search"
+            placeholder="搜索项目名 / 类型 / 设定…"
+            value={topSearch}
+            onChange={(e) => setTopSearch(e.target.value)}
+            aria-label="搜索项目"
+          />
+        </div>
+        <div className="creation-topbar-right">
           <button
             type="button"
-            className="btn btn-primary btn-sm"
-            onClick={() => setCreatingProject(true)}
+            className="btn btn-primary"
+            onClick={onCreateNew}
           >
-            + 新建
+            + 新建项目
           </button>
         </div>
-        {projectsLoading ? (
-          <p className="muted small">加载项目...</p>
-        ) : filteredProjects.length === 0 ? (
-          <p className="muted small">
-            {projects.length === 0 ? '还没有项目, 点击「+ 新建」开始.' : '无匹配项目.'}
-          </p>
-        ) : (
-          <ul className="creation-project-list">
-            {filteredProjects.map((p) => (
-              <li key={p.id}>
-                <button
-                  type="button"
-                  className={`creation-project-item ${activeProjectId === p.id ? 'active' : ''}`}
-                  onClick={() => setActiveProjectId(p.id)}
-                >
-                  <div className="creation-project-item-title">{p.title}</div>
-                  <div className="creation-project-item-meta muted small">
-                    {p.genre || '—'} · 第 {p.current_chapter_no} 章
-                  </div>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </aside>
+      </header>
 
-      {/* 右侧: 主区 */}
-      <main className="creation-main">
-        {creatingProject ? (
-          <div className="creation-main-section">
-            <h2>新建创作项目</h2>
-            <ProjectForm
-              models={models}
-              onSubmit={handleCreateProject}
-              onCancel={() => setCreatingProject(false)}
-              submitting={submittingProject}
-            />
-          </div>
-        ) : !activeProjectId ? (
-          <div className="creation-main-empty muted">
-            <p>👈 在左侧选择项目, 或点击「+ 新建」开始创作.</p>
-          </div>
-        ) : detailLoading || !projectDetail ? (
-          <div className="creation-main-empty muted">
-            <p>加载项目详情...</p>
+      <div className="creation-project-list-body">
+        {loading ? (
+          <p className="muted">加载项目…</p>
+        ) : projects.length === 0 ? (
+          <div className="creation-project-list-empty">
+            <h3>还没有项目</h3>
+            <p className="muted">点击右上角「+ 新建项目」开始创作</p>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={onCreateNew}
+              style={{ marginTop: 16 }}
+            >
+              + 新建创作项目
+            </button>
           </div>
         ) : (
-          <ProjectDetailView
-            projectDetail={projectDetail}
-            editingProject={editingProject}
-            setEditingProject={setEditingProject}
-            submittingProject={submittingProject}
-            handleUpdateProject={handleUpdateProject}
-            handleDeleteProject={handleDeleteProject}
-            handleSeedKG={handleSeedKG}
-            handleClearKG={handleClearKG}
-            chapterDetail={chapterDetail}
-            chapterLoading={chapterLoading}
-            setActiveChapterId={setActiveChapterId}
-            handleGenerate={handleGenerate}
-            generating={generating}
-            genProgress={genProgress}
-            handleSelectVariant={handleSelectVariant}
-            handleEditVariant={handleEditVariant}
-            handleSaveContent={handleSaveContent}
-            handleConfirmChapter={handleConfirmChapter}
-            saving={saving}
-            confirming={confirming}
-            kgRefreshKey={kgRefreshKey}
-          />
+          <>
+            <div className="creation-project-list-header">
+              <h2>我的项目 ({filtered.length})</h2>
+              <span className="muted small">点击卡片进入项目</span>
+            </div>
+            <div className="creation-project-grid">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className="creation-project-card-large"
+                  onClick={() => onSelectProject(p.id)}
+                  title={`进入项目「${p.title}」`}
+                >
+                  <div className="creation-project-card-large-icon">📖</div>
+                  <div className="creation-project-card-large-body">
+                    <h3 className="creation-project-card-large-title">
+                      {p.title || '未命名项目'}
+                    </h3>
+                    <div className="creation-project-card-large-meta muted small">
+                      {p.genre || '—'} · 第 {p.current_chapter_no || 1} 章
+                    </div>
+                    {(p.worldview || p.outline) && (
+                      <p className="creation-project-card-large-desc muted small">
+                        {(p.outline || p.worldview).slice(0, 80)}
+                        {(p.outline || p.worldview).length > 80 ? '…' : ''}
+                      </p>
+                    )}
+                    {p.updated_at && (
+                      <div className="creation-project-card-large-time muted small">
+                        更新: {formatDateTime(p.updated_at)}
+                      </div>
+                    )}
+                  </div>
+                  <span className="creation-project-card-large-arrow" aria-hidden="true">→</span>
+                </button>
+              ))}
+            </div>
+          </>
         )}
-      </main>
+      </div>
     </div>
   );
 }
 
-function ProjectDetailView({
-  projectDetail,
-  editingProject,
-  setEditingProject,
-  submittingProject,
-  handleUpdateProject,
-  handleDeleteProject,
-  handleSeedKG,
-  handleClearKG,
-  chapterDetail,
-  chapterLoading,
-  setActiveChapterId,
-  handleGenerate,
-  generating,
-  genProgress,
-  handleSelectVariant,
-  handleEditVariant,
-  handleSaveContent,
-  handleConfirmChapter,
-  saving,
-  confirming,
-  kgRefreshKey,
-}) {
+// ============================================================
+// Notion 风格主工作区
+// ============================================================
+function NotionWorkspace(props) {
+  const {
+    onSelectProject, onCreateNew, onBackToProjects,
+    projectDetail, chapterDetail, chapterLoading,
+    generating, genProgress, saving, confirming, deleting, regenOf, setRegenOf,
+    kgRefreshKey, editingProject, submittingProject, setEditingProject,
+    handleUpdateProject, handleDeleteProject, handleSeedKG, handleClearKG,
+    setActiveChapterId, handleGenerate, handleSelectVariant, handleEditVariant,
+    handleSaveContent, handleConfirmChapter, handleExportChapter,
+    handleDeleteChapter, handleRegenerateChapter,
+  } = props;
+
   const project = projectDetail.project;
   const chapters = projectDetail.chapters || [];
   const kgStats = projectDetail.kg_stats || {};
   const nextChapterNo = project.current_chapter_no || 1;
   const hasConcepts = (project.initial_concepts || []).length > 0;
 
+  const currentStep = useMemo(
+    () => getCurrentStep(chapterDetail, generating),
+    [chapterDetail, generating]
+  );
+  const progressPercent = useMemo(
+    () => getGenerationProgressPercent(genProgress),
+    [genProgress]
+  );
+
+  const [referenceOpen, setReferenceOpen] = useState(true);
+
   return (
-    <>
-      {/* 项目设定 (可折叠) */}
-      <section className="creation-main-section">
-        <header className="creation-section-head">
-          <h2>{project.title}</h2>
-          <div className="creation-section-actions">
+    <div className="creation-studio">
+      <div className="creation-workspace creation-workspace-notion">
+        <header className="creation-topbar">
+          <div className="creation-topbar-left">
+            <button
+              type="button"
+              className="creation-topbar-back"
+              onClick={onBackToProjects}
+              title="返回项目列表"
+            >
+              ← 返回项目列表
+            </button>
+            <span className="creation-topbar-project-title">
+              {project.title || '未命名项目'}
+            </span>
+          </div>
+
+          <div className="creation-topbar-center">
+            <FlowProgressCompact
+              currentStep={currentStep}
+              generating={generating}
+            />
+            {generating && (
+              <div className="creation-topbar-mini-progress" title="生成进度">
+                <div className="creation-topbar-mini-bar">
+                  <div
+                    className="creation-topbar-mini-bar-fill"
+                    style={{ width: `${Math.round(progressPercent * 100)}%` }}
+                  />
+                </div>
+                <span>{Math.round(progressPercent * 100)}%</span>
+              </div>
+            )}
+          </div>
+
+          <div className="creation-topbar-right">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={onCreateNew}
+              title="新建一个创作项目"
+            >
+              + 新建项目
+            </button>
+            <div className="creation-topbar-divider" />
             <button
               type="button"
               className="btn btn-ghost btn-sm"
               onClick={() => setEditingProject(!editingProject)}
+              title="编辑项目设定"
             >
-              {editingProject ? '收起' : '编辑设定'}
+              ⚙ 设定
             </button>
             {hasConcepts && (
-              <button type="button" className="btn btn-ghost btn-sm" onClick={handleSeedKG}>
-                灌入种子图谱
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={handleSeedKG}
+                title="把初始人物灌入知识图谱"
+              >
+                📊 灌入
               </button>
             )}
             {(kgStats.characters || 0) > 0 && (
-              <button type="button" className="btn btn-ghost btn-sm" onClick={handleClearKG}>
-                清空图谱
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={handleClearKG}
+                title="清空知识图谱"
+              >
+                🗑 清空
               </button>
             )}
+            <div className="creation-topbar-divider" />
+            <button
+              type="button"
+              className="creation-reference-toggle"
+              onClick={() => setReferenceOpen((v) => !v)}
+              title={referenceOpen ? '隐藏右侧参考面板' : '显示右侧参考面板'}
+              aria-label={referenceOpen ? '隐藏右侧' : '显示右侧'}
+            >
+              {referenceOpen ? '»' : '«'}
+            </button>
             <button
               type="button"
               className="btn btn-ghost btn-sm danger"
               onClick={handleDeleteProject}
+              title="删除项目"
             >
-              删除项目
+              ×
             </button>
           </div>
-        </header>
-        <div className="creation-project-meta muted small">
-          {project.genre || '—'} · 模型 ID: {project.model_id || '默认'} · 当前进度: 第 {nextChapterNo} 章
-        </div>
-        {editingProject ? (
-          <ProjectForm
-            initial={project}
-            models={[]}
-            isEdit
-            submitting={submittingProject}
-            onSubmit={handleUpdateProject}
-            onCancel={() => setEditingProject(false)}
-          />
-        ) : (
-          <div className="creation-project-readonly">
-            {project.worldview && (
-              <div className="creation-project-field">
-                <h5>世界观</h5>
-                <p>{project.worldview}</p>
-              </div>
-            )}
-            {project.outline && (
-              <div className="creation-project-field">
-                <h5>总纲</h5>
-                <p>{project.outline}</p>
-              </div>
-            )}
-            {hasConcepts && (
-              <div className="creation-project-field">
-                <h5>初始人物 ({project.initial_concepts.length})</h5>
-                <ul>
-                  {project.initial_concepts.map((c, i) => (
-                    <li key={i}>
-                      <strong>{c.name}</strong>
-                      {c.attributes && Object.keys(c.attributes).length > 0 && (
-                        <span className="muted small"> · {JSON.stringify(c.attributes)}</span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {project.style_pref && Object.keys(project.style_pref).length > 0 && (
-              <div className="creation-project-field">
-                <h5>文风偏好</h5>
-                <ul>
-                  {Object.entries(project.style_pref).map(([k, v]) => (
-                    <li key={k}><strong>{k}</strong>: {String(v) || '—'}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
+
+          <div className="creation-topbar-progress" aria-hidden="true">
+            <div
+              className="creation-topbar-progress-bar"
+              style={{ width: `${progressPercent * 100}%` }}
+            />
           </div>
-        )}
-      </section>
-
-      {/* 章节生成器 + 章节列表 */}
-      <section className="creation-main-section">
-        <header className="creation-section-head">
-          <h3>章节生成</h3>
         </header>
-        <ChapterGenerator
-          project={project}
-          nextChapterNo={nextChapterNo}
-          generating={generating}
-          progress={genProgress}
-          onGenerate={handleGenerate}
-          onCancel={() => {
-            // 真取消需要后端支持, 此处仅清空 UI
-            setGenProgress(null);
-          }}
-        />
-      </section>
 
-      <section className="creation-main-section">
-        <header className="creation-section-head">
-          <h3>章节列表 ({chapters.length})</h3>
-        </header>
-        <ChapterList
-          chapters={chapters}
-          selectedChapterId={chapterDetail?.id}
-          onSelect={setActiveChapterId}
-          loading={chapterLoading && !chapterDetail}
-          generating={generating}
-        />
-      </section>
+        <div
+          className={
+            'creation-workspace-body creation-workspace-notion-body'
+            + (referenceOpen ? '' : ' is-reference-collapsed')
+          }
+        >
+          <ChapterOutlinePane
+            chapters={chapters}
+            activeChapterId={chapterDetail?.id}
+            nextChapterNo={nextChapterNo}
+            generating={generating}
+            onSelectChapter={(ch) => { setActiveChapterId(ch.id); setRegenOf(null); }}
+            onExportChapter={handleExportChapter}
+            onRegenerateChapter={handleRegenerateChapter}
+            onDeleteChapter={handleDeleteChapter}
+            onGenerateNext={() => { setActiveChapterId(null); setRegenOf(null); }}
+          />
 
-      {/* 当前章节详情: 三选一 或 编辑器 */}
-      {chapterDetail && (
-        <section className="creation-main-section">
-          <header className="creation-section-head">
-            <h3>
-              第 {chapterDetail.chapter_no} 章 · {chapterDetail.title || '(未命名)'}
-            </h3>
-            <span className="muted small">
-              状态: {chapterDetail.status} · {chapterDetail.word_count} 字
+          <CanvasPane
+            project={project}
+            chapterDetail={chapterDetail}
+            chapterLoading={chapterLoading}
+            generating={generating}
+            genProgress={genProgress}
+            saving={saving}
+            confirming={confirming}
+            regenOf={regenOf}
+            setRegenOf={setRegenOf}
+            handleGenerate={handleGenerate}
+            handleSelectVariant={handleSelectVariant}
+            handleEditVariant={handleEditVariant}
+            handleSaveContent={handleSaveContent}
+            handleConfirmChapter={handleConfirmChapter}
+            handleExportChapter={handleExportChapter}
+            handleDeleteChapter={handleDeleteChapter}
+            handleRegenerateChapter={handleRegenerateChapter}
+          />
+
+          <ReferencePane
+            open={referenceOpen}
+            project={project}
+            kgStats={kgStats}
+            kgRefreshKey={kgRefreshKey}
+            editingProject={editingProject}
+            setEditingProject={setEditingProject}
+            submittingProject={submittingProject}
+            handleUpdateProject={handleUpdateProject}
+            handleSeedKG={handleSeedKG}
+            handleClearKG={handleClearKG}
+            hasConcepts={hasConcepts}
+            onToggle={() => setReferenceOpen((v) => !v)}
+            threads={projectDetail.plot_threads || []}
+            locations={projectDetail.locations || []}
+            themesProgress={projectDetail.themes_progress || []}
+            kgChars={projectDetail.kg_full?.characters || []}
+            kgEvents={projectDetail.kg_full?.events || []}
+            kgLocations={projectDetail.kg_full?.locations || []}
+            kgCharRels={projectDetail.kg_full?.character_relations || []}
+            kgCharEventRels={projectDetail.kg_full?.character_event_relations || []}
+            kgEventRels={projectDetail.kg_full?.event_relations || []}
+            activeChapter={chapterDetail}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 顶栏: 紧凑版流程进度 (5 步 inline)
+// ============================================================
+function FlowProgressCompact({ currentStep, generating }) {
+  const curIdx = FLOW_STEPS.findIndex((s) => s.key === currentStep);
+  return (
+    <ol
+      className="creation-flow-progress creation-flow-progress-compact"
+      aria-label="章节生成流程"
+    >
+      {FLOW_STEPS.map((s, i) => {
+        const isDone = i < curIdx;
+        const isActive = i === curIdx;
+        const isCurrentGenerating = isActive && s.key === 'generate' && generating;
+        return (
+          <li
+            key={s.key}
+            className={
+              'creation-flow-step'
+              + (isDone ? ' is-done' : '')
+              + (isActive ? ' is-active' : '')
+              + (isCurrentGenerating ? ' is-running' : '')
+            }
+          >
+            <span className="creation-flow-num">
+              {isDone ? '✓' : (i + 1)}
             </span>
-          </header>
+            <span className="creation-flow-label">{s.label}</span>
+            {isCurrentGenerating && (
+              <span className="creation-flow-pulse" aria-hidden="true">
+                <span
+                  style={{
+                    display: 'inline-block',
+                    width: 6,
+                    height: 6,
+                    borderRadius: 3,
+                    background: 'var(--accent-color, #6366f1)',
+                    animation: 'creation-flow-pulse 1.2s ease-in-out infinite',
+                  }}
+                />
+              </span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
 
-          {chapterDetail.status === 'confirmed' ? (
-            <>
-              <p className="muted small">本章已确认, 内容已固化入项目级知识图谱.</p>
-              <details className="creation-final-content">
-                <summary>查看最终正文</summary>
-                <pre>{chapterDetail.final_content}</pre>
-              </details>
-            </>
-          ) : chapterDetail.status === 'generating' ? (
-            <p className="muted small">生成中, 请稍候...</p>
+// ============================================================
+// 左栏: 章节大纲 (主导航)
+// ============================================================
+function ChapterOutlinePane({
+  chapters, activeChapterId, nextChapterNo, generating,
+  onSelectChapter, onExportChapter, onRegenerateChapter, onDeleteChapter,
+  onGenerateNext,
+}) {
+  return (
+    <aside className="creation-toc-pane">
+      <div className="creation-toc-pane-head">
+        <h3>📑 章节大纲</h3>
+        <span className="muted small">{chapters.length} 章</span>
+      </div>
+      <div className="creation-toc-pane-body">
+        {chapters.length === 0 ? (
+          <p className="muted small" style={{ padding: '8px 4px' }}>
+            还没有章节, 点击下方按钮开始
+          </p>
+        ) : (
+          chapters.map((ch) => (
+            <ChapterTOCItem
+              key={ch.id}
+              chapter={ch}
+              active={ch.id === activeChapterId}
+              onSelect={() => onSelectChapter(ch)}
+              onExport={() => onExportChapter(ch)}
+              onRegenerate={() => onRegenerateChapter(ch)}
+              onDelete={() => onDeleteChapter(ch)}
+            />
+          ))
+        )}
+      </div>
+      <div className="creation-toc-pane-foot">
+        <button
+          type="button"
+          className="btn btn-primary btn-block"
+          onClick={onGenerateNext}
+          disabled={generating}
+        >
+          + 生成第 {nextChapterNo} 章
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function ChapterTOCItem({ chapter, active, onSelect, onExport, onRegenerate, onDelete }) {
+  const status = chapter.status;
+  const statusBadge = (() => {
+    switch (status) {
+      case 'confirmed':  return { dot: '✓', cls: 'confirmed' };
+      case 'selected':   return { dot: '●', cls: 'selected' };
+      case 'edited':     return { dot: '●', cls: 'edited' };
+      case 'generated':  return { dot: '○', cls: 'generated' };
+      case 'generating': return { dot: '⋯', cls: 'generating' };
+      default:           return { dot: '·', cls: 'unknown' };
+    }
+  })();
+
+  return (
+    <div className={`creation-toc-item ${active ? 'active' : ''}`}>
+      <button
+        type="button"
+        className="creation-toc-item-main"
+        onClick={onSelect}
+        title={`第 ${chapter.chapter_no} 章 · ${chapter.title || '(未命名)'}`}
+      >
+        <span className={`creation-toc-dot status-${statusBadge.cls}`}>
+          {statusBadge.dot}
+        </span>
+        <span className="creation-toc-num">第 {chapter.chapter_no} 章</span>
+        <span className="creation-toc-title">
+          {chapter.title || <span className="muted">(未命名)</span>}
+        </span>
+        {chapter.word_count > 0 && (
+          <span className="creation-toc-wc muted small">
+            {chapter.word_count}字
+          </span>
+        )}
+      </button>
+      <div className="creation-toc-actions">
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={(e) => { e.stopPropagation(); onExport(); }}
+          title="导出 TXT"
+          aria-label="导出"
+        >
+          ⤓
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={(e) => { e.stopPropagation(); onRegenerate(); }}
+          title="重新生成"
+          aria-label="重新生成"
+          disabled={chapter.status === 'generating'}
+        >
+          ↻
+        </button>
+        <button
+          type="button"
+          className="icon-btn danger"
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          title="删除"
+          aria-label="删除"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 中栏: 主工作区 (Canvas)
+// ============================================================
+function CanvasPane({
+  project, chapterDetail, chapterLoading,
+  generating, genProgress, saving, confirming,
+  regenOf, setRegenOf,
+  handleGenerate, handleSelectVariant, handleEditVariant,
+  handleSaveContent, handleConfirmChapter,
+  handleExportChapter, handleDeleteChapter, handleRegenerateChapter,
+}) {
+  const nextChapterNo = project.current_chapter_no || 1;
+  const isRegen = !!regenOf;
+
+  // 标题优先级: regen > 当前 chapter.title > 自动生成的标题(生成中) > 默认
+  const autoTitle = genProgress?.autoTitle;
+
+  let headTitle, headHint;
+  if (isRegen) {
+    headTitle = `↻ 重新生成第 ${regenOf.chapter_no} 章`;
+    headHint = `原标题: ${regenOf.title || '(未命名)'} · 状态: ${regenOf.status}`;
+  } else if (chapterDetail) {
+    headTitle = `第 ${chapterDetail.chapter_no} 章 · ${chapterDetail.title || '(未命名)'}`;
+    headHint = `状态: ${chapterDetail.status} · ${chapterDetail.word_count} 字`;
+  } else if (autoTitle && generating) {
+    headTitle = `第 ${nextChapterNo} 章 · ${autoTitle}`;
+    headHint = 'AI 已自动生成标题, 正在撰写正文…';
+  } else {
+    headTitle = `生成第 ${nextChapterNo} 章`;
+    headHint = '为下一章提供意图, AI 会自动生成 3 个候选版本';
+  }
+
+  return (
+    <main className="creation-canvas-pane">
+      <div className="creation-canvas-pane-inner">
+        <header className="creation-canvas-head">
+          <div>
+            <h2>{headTitle}</h2>
+            <div className="muted small">{headHint}</div>
+          </div>
+          {(chapterDetail || isRegen) && (() => {
+            const targetChapter = chapterDetail || regenOf;
+            return (
+              <ChapterActions
+                chapter={targetChapter}
+                generating={generating}
+                onExport={() => handleExportChapter(targetChapter)}
+                onRegenerate={() => handleRegenerateChapter(targetChapter)}
+                onDelete={() => handleDeleteChapter(targetChapter)}
+              />
+            );
+          })()}
+        </header>
+
+        <div className="creation-canvas-body">
+          {isRegen ? (
+            <ChapterGenerator
+              key={`regen-${regenOf.id}`}
+              project={project}
+              nextChapterNo={regenOf.chapter_no}
+              generating={generating}
+              progress={genProgress}
+              regenMode
+              initialTitle={regenOf.title}
+              onGenerate={({ user_intent, title, chapter_no }) => {
+                handleGenerate({ user_intent, title, chapter_no });
+                setRegenOf(null);
+              }}
+              onCancelRegen={() => setRegenOf(null)}
+            />
+          ) : generating ? (
+            <GenerationProgress progress={genProgress} />
+          ) : !chapterDetail ? (
+            <ChapterGenerator
+              project={project}
+              nextChapterNo={nextChapterNo}
+              generating={generating}
+              progress={genProgress}
+              onGenerate={handleGenerate}
+            />
+          ) : chapterLoading ? (
+            <p className="muted">加载章节中…</p>
+          ) : chapterDetail.status === 'confirmed' ? (
+            <ConfirmedView chapter={chapterDetail} onExport={() => handleExportChapter(chapterDetail)} />
           ) : chapterDetail.status === 'selected' || chapterDetail.status === 'edited' ? (
             <VariantEditor
               chapter={chapterDetail}
@@ -578,16 +1062,371 @@ function ProjectDetailView({
               onConfirm={(v) => handleEditVariant(v)}
             />
           )}
-        </section>
-      )}
+        </div>
+      </div>
+    </main>
+  );
+}
 
-      {/* 知识图谱预览 */}
-      <section className="creation-main-section">
-        <header className="creation-section-head">
-          <h3>项目级知识图谱</h3>
-        </header>
-        <ProjectKGPreview projectId={project.id} refreshKey={kgRefreshKey} />
-      </section>
-    </>
+// ============================================================
+// 右栏: 设定 + KG (可折叠)
+// ============================================================
+function ReferencePane({
+  open, project, kgStats, kgRefreshKey,
+  editingProject, setEditingProject, submittingProject,
+  handleUpdateProject, handleSeedKG, handleClearKG, hasConcepts, onToggle,
+  threads = [], locations = [], themesProgress = [],
+  kgChars = [], kgEvents = [], kgLocations = [],
+  kgCharRels = [], kgCharEventRels = [], kgEventRels = [],
+  activeChapter = null,
+}) {
+  if (!open) return null;
+
+  const openThreads = threads.filter((t) => t.status === 'open' || t.status === 'hinting');
+  const resolvedThreads = threads.filter((t) => t.status === 'resolved' || t.status === 'dropped');
+
+  return (
+    <aside className="creation-reference-pane">
+      <div className="creation-reference-pane-head">
+        <h3>📚 设定 / 参考</h3>
+        <button
+          type="button"
+          className="creation-reference-toggle"
+          onClick={onToggle}
+          title="隐藏右侧参考面板"
+          aria-label="隐藏右侧"
+        >
+          »
+        </button>
+      </div>
+      <div className="creation-reference-pane-body">
+        <section className="creation-reference-section">
+          <h4>
+            <span>项目设定</span>
+            <span className="badge">世界观 / 总纲 / 人物 / 文风</span>
+          </h4>
+          {editingProject ? (
+            <ProjectForm
+              initial={project}
+              models={[]}
+              isEdit
+              submitting={submittingProject}
+              onSubmit={handleUpdateProject}
+              onCancel={() => setEditingProject(false)}
+            />
+          ) : (
+            <div className="creation-project-readonly">
+              <div className="muted small">
+                {project.genre || '—'} · 模型 {project.model_id || '默认'} · 第 {project.current_chapter_no || 1} 章
+              </div>
+              {project.worldview && (
+                <div className="creation-project-field">
+                  <h5>世界观</h5>
+                  <p>{project.worldview}</p>
+                </div>
+              )}
+              {project.outline && (
+                <div className="creation-project-field">
+                  <h5>总纲</h5>
+                  <p>{project.outline}</p>
+                </div>
+              )}
+              {hasConcepts && (
+                <div className="creation-project-field">
+                  <h5>初始人物 ({project.initial_concepts.length})</h5>
+                  <ul>
+                    {project.initial_concepts.map((c, i) => (
+                      <li key={i}>
+                        <strong>{c.name}</strong>
+                        {c.attributes && Object.keys(c.attributes).length > 0 && (
+                          <span className="muted small"> · {JSON.stringify(c.attributes)}</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {project.style_pref && Object.keys(project.style_pref).length > 0 && (
+                <div className="creation-project-field">
+                  <h5>文风偏好</h5>
+                  <ul>
+                    {Object.entries(project.style_pref).map(([k, v]) => (
+                      <li key={k}><strong>{k}</strong>: {String(v) || '—'}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="creation-project-card-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setEditingProject(true)}
+                >
+                  ✎ 编辑设定
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* ⑨ 主题进度 */}
+        {themesProgress.length > 0 && (
+          <section className="creation-reference-section">
+            <h4>
+              <span>主题进度</span>
+              <span className="badge">{themesProgress.length} 个主题</span>
+            </h4>
+            <ul className="creation-theme-progress">
+              {themesProgress.map((t, i) => {
+                const p = Math.max(0, Math.min(1, Number(t.progress) || 0));
+                return (
+                  <li key={i} className="creation-theme-progress-item">
+                    <div className="creation-theme-progress-label">
+                      <span>{t.theme || '?'}</span>
+                      <span className="creation-theme-progress-stage">
+                        {Math.round(p * 100)}% · {t.stage || '铺垫'}
+                      </span>
+                    </div>
+                    <div className="creation-theme-progress-bar">
+                      <div
+                        className="creation-theme-progress-fill"
+                        style={{ width: `${p * 100}%` }}
+                      />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
+
+        {/* ⑤ 剧情线索 */}
+        {threads.length > 0 && (
+          <section className="creation-reference-section">
+            <h4>
+              <span>剧情线索</span>
+              <span className="badge">{openThreads.length} 未结 / {threads.length} 总</span>
+            </h4>
+            <ul className="creation-thread-list">
+              {openThreads.map((t, i) => (
+                <li key={`o-${i}`} className="creation-thread-item">
+                  <div className="creation-thread-item-head">
+                    <span className="creation-thread-item-title" title={t.title}>
+                      {t.title}
+                    </span>
+                    <span className={`creation-thread-status status-${t.status}`}>
+                      {t.status}
+                    </span>
+                  </div>
+                  <div className="creation-thread-item-head">
+                    <span className="creation-thread-priority" title={`优先级 ${t.priority}/5`}>
+                      {[1, 2, 3, 4, 5].map((n) => (
+                        <span
+                          key={n}
+                          className={`creation-thread-priority-dot ${
+                            n <= (t.priority || 0) ? 'is-filled' : ''
+                          }`}
+                        />
+                      ))}
+                    </span>
+                    {t.thread_type && (
+                      <span className="muted small">{t.thread_type}</span>
+                    )}
+                  </div>
+                  {t.notes && <p className="creation-thread-notes">{t.notes}</p>}
+                </li>
+              ))}
+              {resolvedThreads.length > 0 && (
+                <li className="muted small" style={{ marginTop: 4 }}>
+                  已回收/放弃 {resolvedThreads.length} 条 (折叠)
+                </li>
+              )}
+            </ul>
+          </section>
+        )}
+
+        {/* ④ 地点 */}
+        {locations.length > 0 && (
+          <section className="creation-reference-section">
+            <h4>
+              <span>地点</span>
+              <span className="badge">{locations.length} 个</span>
+            </h4>
+            <ul className="creation-location-list">
+              {locations.map((l) => (
+                <li key={l.id} className="creation-location-item">
+                  <span className="creation-location-item-name" title={l.name}>
+                    {l.name}
+                  </span>
+                  {l.location_type && (
+                    <span className="creation-location-type">{l.location_type}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {/* ⑩ KG Graph 可视化 */}
+        <section className="creation-reference-section">
+          <h4>
+            <span>图谱视图</span>
+            <span className="badge">SVG</span>
+          </h4>
+          <KGGraphView
+            characters={kgChars}
+            events={kgEvents}
+            locations={kgLocations}
+            characterRelations={kgCharRels}
+            characterEventRelations={kgCharEventRels}
+            eventRelations={kgEventRels}
+          />
+        </section>
+
+        {/* ⑦ Compass 报告 (per-chapter) */}
+        {activeChapter && activeChapter.compass_score != null && (
+          <section className="creation-reference-section">
+            <h4>
+              <span>CompassAgent 偏离度</span>
+              <span className="badge">
+                {Number(activeChapter.compass_score).toFixed(1)} / 10
+              </span>
+            </h4>
+            {activeChapter.compass_summary && (
+              <p className="creation-compass-summary">{activeChapter.compass_summary}</p>
+            )}
+            {activeChapter.compass_warnings && activeChapter.compass_warnings.length > 0 && (
+              <div>
+                {activeChapter.compass_warnings.map((w, i) => (
+                  <div
+                    key={i}
+                    className={`creation-compass-warning ${
+                      w.severity === 'warn' ? 'dim' : ''
+                    }`}
+                  >
+                    {w.text || w.dim}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        <section className="creation-reference-section">
+          <h4>
+            <span>知识图谱 (列表)</span>
+            <span className="badge">
+              {kgStats.characters || 0} 人物 / {kgStats.events || 0} 事件
+            </span>
+          </h4>
+          <ProjectKGPreview projectId={project.id} refreshKey={kgRefreshKey} />
+        </section>
+      </div>
+    </aside>
+  );
+}
+
+// ============================================================
+// 操作按钮 (导出 / 重新生成 / 删除)
+// ============================================================
+function ChapterActions({ chapter, generating, onExport, onRegenerate, onDelete }) {
+  const disabled = generating || !chapter;
+  return (
+    <div className="creation-chapter-actions">
+      <button
+        type="button"
+        className="btn btn-ghost btn-sm"
+        onClick={onExport}
+        disabled={disabled || !chapter.final_content}
+        title="导出为 TXT"
+      >
+        ⤓ 导出 TXT
+      </button>
+      <button
+        type="button"
+        className="btn btn-ghost btn-sm"
+        onClick={onRegenerate}
+        disabled={disabled}
+        title="用可选的新需求重新生成此章"
+      >
+        ↻ 重新生成
+      </button>
+      <button
+        type="button"
+        className="btn btn-ghost btn-sm danger"
+        onClick={onDelete}
+        disabled={disabled}
+        title="删除此章"
+      >
+        × 删除
+      </button>
+    </div>
+  );
+}
+
+// ============================================================
+// 进度展示 + 已确认视图
+// ============================================================
+function GenerationProgress({ progress }) {
+  if (!progress) {
+    return <p className="muted small">准备生成…</p>;
+  }
+  const stage = progress.stage || 'start';
+  const variants = progress.variants || {};
+  const variantCount = Object.keys(variants).length;
+  return (
+    <div className="creation-generation-progress">
+      <h4>生成中: {stage}</h4>
+      {progress.directions && progress.directions.length > 0 && (
+        <div className="muted small">
+          Planner 已生成 {progress.directions.length} 个分叉方向
+        </div>
+      )}
+      {variantCount > 0 && (
+        <ul className="creation-progress-variants">
+          {[0, 1, 2].map((i) => {
+            const v = variants[i];
+            if (!v) return (
+              <li key={i} className="creation-progress-variant pending">
+                <span>版本 {i + 1}</span>
+                <span className="muted small">等待</span>
+              </li>
+            );
+            return (
+              <li key={i} className={`creation-progress-variant ${v.state || 'pending'}`}>
+                <span>版本 {i + 1}</span>
+                <span>
+                  {v.state === 'done'
+                    ? `完成 · 评分 ${v.score ?? '?'}`
+                    : v.state === 'critiquing'
+                      ? `Critic 审核中 (${v.word_count || '?'} 字)`
+                      : '撰写中'}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {progress.error && (
+        <p className="creation-error small">{progress.error}</p>
+      )}
+    </div>
+  );
+}
+
+function ConfirmedView({ chapter, onExport }) {
+  return (
+    <div className="creation-confirmed">
+      <p className="muted small">✅ 本章已确认, 内容已固化入项目级知识图谱.</p>
+      <details className="creation-final-content" open>
+        <summary>查看最终正文 ({chapter.word_count} 字)</summary>
+        <pre>{chapter.final_content}</pre>
+      </details>
+      <div className="creation-actions-row">
+        <button type="button" className="btn btn-ghost" onClick={onExport}>
+          ⤓ 导出 TXT
+        </button>
+      </div>
+    </div>
   );
 }

@@ -224,6 +224,7 @@ SCHEMA_STATEMENTS: List[str] = [
         model_id INTEGER,
         current_chapter_no INTEGER NOT NULL DEFAULT 1,
         status TEXT NOT NULL DEFAULT 'draft',
+        themes_progress TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL
@@ -243,6 +244,10 @@ SCHEMA_STATEMENTS: List[str] = [
         final_content TEXT,
         word_count INTEGER NOT NULL DEFAULT 0,
         kg_extracted INTEGER NOT NULL DEFAULT 0,
+        current_location TEXT,
+        compass_score REAL,
+        compass_warnings TEXT,
+        compass_summary TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         confirmed_at TIMESTAMP,
@@ -264,6 +269,9 @@ SCHEMA_STATEMENTS: List[str] = [
         critic_report TEXT,
         score REAL NOT NULL DEFAULT 0,
         model_id INTEGER,
+        kg_extracted_at TIMESTAMP,
+        kg_entity_count INTEGER NOT NULL DEFAULT 0,
+        kg_event_count INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (chapter_id) REFERENCES ai_chapters(id) ON DELETE CASCADE,
         UNIQUE (chapter_id, variant_index)
@@ -281,6 +289,12 @@ SCHEMA_STATEMENTS: List[str] = [
         source_chapter_id INTEGER,
         model_id INTEGER,
         extras TEXT,
+        role TEXT,
+        faction TEXT,
+        current_location_entity_id TEXT,
+        status TEXT,
+        first_appearance_chapter_id INTEGER,
+        importance INTEGER,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
@@ -301,6 +315,9 @@ SCHEMA_STATEMENTS: List[str] = [
         source_chapter_id INTEGER,
         model_id INTEGER,
         extras TEXT,
+        in_story_time TEXT,
+        chapter_time_label TEXT,
+        importance INTEGER,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
@@ -339,6 +356,8 @@ SCHEMA_STATEMENTS: List[str] = [
         properties TEXT,
         extras TEXT,
         source_chapter_id INTEGER,
+        start_chapter_id INTEGER,
+        end_chapter_id INTEGER,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
         FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL
@@ -355,12 +374,81 @@ SCHEMA_STATEMENTS: List[str] = [
         properties TEXT,
         extras TEXT,
         source_chapter_id INTEGER,
+        relation_type TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
         FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_ai_kg_ee_rels_project ON ai_kg_event_relations(project_id)",
+    # ============================================================
+    # v0.3.x 新增表: 地点 / 伏笔线索 / 出场记录
+    # ============================================================
+    """
+    CREATE TABLE IF NOT EXISTS ai_kg_locations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        entity_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        location_type TEXT,                       -- 城市 / 建筑 / 秘境 / 区域 / 异空间
+        attributes TEXT,                          -- {坐标, 气候, 控制势力, 禁制, 描述}
+        source_chapter_id INTEGER,
+        model_id INTEGER,
+        extras TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL,
+        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL,
+        UNIQUE (project_id, entity_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_locations_project ON ai_kg_locations(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_locations_entity ON ai_kg_locations(project_id, entity_id)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_kg_plot_threads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        thread_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        thread_type TEXT,                          -- 伏笔 / 阴谋 / 角色弧 / 主题弧 / 承诺
+        status TEXT,                               -- open / hinting / resolving / resolved / dropped
+        priority INTEGER,                          -- 1..5, 5=主线
+        introduced_chapter_id INTEGER,
+        resolved_chapter_id INTEGER,
+        related_entity_ids TEXT,                   -- JSON: ["char_001", "evt_007"]
+        notes TEXT,
+        source_chapter_id INTEGER,
+        model_id INTEGER,
+        extras TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY (introduced_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL,
+        FOREIGN KEY (resolved_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL,
+        FOREIGN KEY (source_chapter_id) REFERENCES ai_chapters(id) ON DELETE SET NULL,
+        FOREIGN KEY (model_id) REFERENCES model_configs(id) ON DELETE SET NULL,
+        UNIQUE (project_id, thread_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_threads_project ON ai_kg_plot_threads(project_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_threads_status ON ai_kg_plot_threads(project_id, status)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_kg_character_appearances (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        entity_id TEXT NOT NULL,                    -- 引用 ai_kg_characters.entity_id
+        chapter_id INTEGER NOT NULL,
+        role TEXT,                                  -- 主角 / 出场 / 提及 / 回忆
+        importance INTEGER,                         -- 1..5
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES ai_projects(id) ON DELETE CASCADE,
+        FOREIGN KEY (chapter_id) REFERENCES ai_chapters(id) ON DELETE CASCADE,
+        UNIQUE (project_id, entity_id, chapter_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_appearances_chapter ON ai_kg_character_appearances(chapter_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_kg_appearances_entity ON ai_kg_character_appearances(entity_id)",
 ]
 
 
@@ -444,6 +532,106 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
         logger.info(
             "Migration: added chapter_enrichments.enrichment_intent column"
         )
+
+    # ============================================================
+    # v0.3.x: 知识图谱架构升级 (方案 docs/ai-creation-kg-architecture.md)
+    # ============================================================
+    # ① ai_chapter_variants 加 kg_extracted_at + 计数
+    av_columns = await _get_table_columns(db, "ai_chapter_variants")
+    if av_columns:
+        if "kg_extracted_at" not in av_columns:
+            await db.execute(
+                "ALTER TABLE ai_chapter_variants ADD COLUMN kg_extracted_at TIMESTAMP"
+            )
+            logger.info("Migration: added ai_chapter_variants.kg_extracted_at")
+        if "kg_entity_count" not in av_columns:
+            await db.execute(
+                "ALTER TABLE ai_chapter_variants ADD COLUMN kg_entity_count INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migration: added ai_chapter_variants.kg_entity_count")
+        if "kg_event_count" not in av_columns:
+            await db.execute(
+                "ALTER TABLE ai_chapter_variants ADD COLUMN kg_event_count INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migration: added ai_chapter_variants.kg_event_count")
+
+    # ④ ai_chapters 加当前主场景 + compass 评分
+    chap_columns = await _get_table_columns(db, "ai_chapters")
+    if chap_columns:
+        if "current_location" not in chap_columns:
+            await db.execute("ALTER TABLE ai_chapters ADD COLUMN current_location TEXT")
+            logger.info("Migration: added ai_chapters.current_location")
+        if "compass_score" not in chap_columns:
+            await db.execute("ALTER TABLE ai_chapters ADD COLUMN compass_score REAL")
+            logger.info("Migration: added ai_chapters.compass_score")
+        if "compass_warnings" not in chap_columns:
+            await db.execute("ALTER TABLE ai_chapters ADD COLUMN compass_warnings TEXT")
+            logger.info("Migration: added ai_chapters.compass_warnings")
+        if "compass_summary" not in chap_columns:
+            await db.execute("ALTER TABLE ai_chapters ADD COLUMN compass_summary TEXT")
+            logger.info("Migration: added ai_chapters.compass_summary")
+
+    # ⑥ ai_kg_characters 加结构化字段
+    char_columns = await _get_table_columns(db, "ai_kg_characters")
+    if char_columns:
+        new_char_cols = {
+            "role": "TEXT",  # 主角 / 配角 / 路人 / 反派
+            "faction": "TEXT",  # 所属势力
+            "current_location_entity_id": "TEXT",  # 引用 ai_kg_locations.entity_id
+            "status": "TEXT",  # 存活 / 失踪 / 死亡 / 转生
+            "first_appearance_chapter_id": "INTEGER",
+            "importance": "INTEGER",  # 1..5
+        }
+        for col, ty in new_char_cols.items():
+            if col not in char_columns:
+                await db.execute(
+                    f"ALTER TABLE ai_kg_characters ADD COLUMN {col} {ty}"
+                )
+                logger.info("Migration: added ai_kg_characters.%s", col)
+
+    # ⑥ ai_kg_events 加结构化字段
+    ev_columns = await _get_table_columns(db, "ai_kg_events")
+    if ev_columns:
+        new_ev_cols = {
+            "in_story_time": "TEXT",  # "第3年 暮春"
+            "chapter_time_label": "TEXT",  # "第3章 夜"
+            "importance": "INTEGER",
+        }
+        for col, ty in new_ev_cols.items():
+            if col not in ev_columns:
+                await db.execute(
+                    f"ALTER TABLE ai_kg_events ADD COLUMN {col} {ty}"
+                )
+                logger.info("Migration: added ai_kg_events.%s", col)
+
+    # ⑥ ai_kg_character_relations 加时间窗口
+    ccrel_columns = await _get_table_columns(db, "ai_kg_character_relations")
+    if ccrel_columns:
+        for col, ty in {
+            "start_chapter_id": "INTEGER",
+            "end_chapter_id": "INTEGER",
+        }.items():
+            if col not in ccrel_columns:
+                await db.execute(
+                    f"ALTER TABLE ai_kg_character_relations ADD COLUMN {col} {ty}"
+                )
+                logger.info("Migration: added ai_kg_character_relations.%s", col)
+
+    # ⑥ ai_kg_event_relations 加关系类型 (causal/temporal/spatial)
+    eerel_columns = await _get_table_columns(db, "ai_kg_event_relations")
+    if eerel_columns and "relation_type" not in eerel_columns:
+        await db.execute(
+            "ALTER TABLE ai_kg_event_relations ADD COLUMN relation_type TEXT"
+        )
+        logger.info("Migration: added ai_kg_event_relations.relation_type")
+
+    # ⑨ ai_projects 加 themes_progress
+    proj_columns = await _get_table_columns(db, "ai_projects")
+    if proj_columns and "themes_progress" not in proj_columns:
+        await db.execute(
+            "ALTER TABLE ai_projects ADD COLUMN themes_progress TEXT"
+        )
+        logger.info("Migration: added ai_projects.themes_progress")
 
 
 @asynccontextmanager
@@ -1183,9 +1371,52 @@ async def get_knowledge_graph(novel_id: int) -> Dict[str, List[Dict[str, Any]]]:
             row["extras"] = _decode_extras(row.get("extras"))
             ee_relations.append(row)
 
+    # ④ locations
+    cur = await db.execute(
+        """
+        SELECT id, project_id, entity_id, name, location_type, attributes,
+               source_chapter_id, model_id, extras, created_at, updated_at
+        FROM ai_kg_locations WHERE project_id = ? ORDER BY name
+        """,
+        (project_id,),
+    )
+    locations: List[Dict[str, Any]] = []
+    for r in await cur.fetchall():
+        row = dict(r)
+        row["attributes"] = _decode_attributes(row.get("attributes"))
+        row["extras"] = _decode_extras(row.get("extras"))
+        locations.append(row)
+
+    # ⑤ plot_threads (open/hinting 优先)
+    cur = await db.execute(
+        """
+        SELECT id, project_id, thread_id, title, thread_type, status, priority,
+               introduced_chapter_id, resolved_chapter_id, related_entity_ids,
+               notes, source_chapter_id, model_id, created_at, updated_at
+        FROM ai_kg_plot_threads WHERE project_id = ?
+        ORDER BY
+            CASE status WHEN 'open' THEN 0 WHEN 'hinting' THEN 1
+                        WHEN 'resolving' THEN 2 WHEN 'resolved' THEN 3
+                        WHEN 'dropped' THEN 4 ELSE 5 END,
+            priority DESC, created_at ASC
+        """,
+        (project_id,),
+    )
+    threads: List[Dict[str, Any]] = []
+    for r in await cur.fetchall():
+        row = dict(r)
+        if row.get("related_entity_ids"):
+            try:
+                row["related_entity_ids"] = json.loads(row["related_entity_ids"])
+            except (TypeError, ValueError):
+                row["related_entity_ids"] = []
+        threads.append(row)
+
     return {
         "characters": characters,
         "events": events,
+        "locations": locations,
+        "plot_threads": threads,
         "character_event_relations": ce_relations,
         "character_relations": cc_relations,
         "event_relations": ee_relations,
@@ -1986,9 +2217,52 @@ async def get_ai_knowledge_graph(project_id: int) -> Dict[str, List[Dict[str, An
             row["extras"] = _decode_extras(row.get("extras"))
             ee_relations.append(row)
 
+        # ④ locations
+        cur = await db.execute(
+            """
+            SELECT id, project_id, entity_id, name, location_type, attributes,
+                   source_chapter_id, model_id, extras, created_at, updated_at
+            FROM ai_kg_locations WHERE project_id = ? ORDER BY name
+            """,
+            (project_id,),
+        )
+        locations: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            row["attributes"] = _decode_attributes(row.get("attributes"))
+            row["extras"] = _decode_extras(row.get("extras"))
+            locations.append(row)
+
+        # ⑤ plot_threads (open/hinting 优先)
+        cur = await db.execute(
+            """
+            SELECT id, project_id, thread_id, title, thread_type, status, priority,
+                   introduced_chapter_id, resolved_chapter_id, related_entity_ids,
+                   notes, source_chapter_id, model_id, created_at, updated_at
+            FROM ai_kg_plot_threads WHERE project_id = ?
+            ORDER BY
+                CASE status WHEN 'open' THEN 0 WHEN 'hinting' THEN 1
+                            WHEN 'resolving' THEN 2 WHEN 'resolved' THEN 3
+                            WHEN 'dropped' THEN 4 ELSE 5 END,
+                priority DESC, created_at ASC
+            """,
+            (project_id,),
+        )
+        threads: List[Dict[str, Any]] = []
+        for r in await cur.fetchall():
+            row = dict(r)
+            if row.get("related_entity_ids"):
+                try:
+                    row["related_entity_ids"] = json.loads(row["related_entity_ids"])
+                except (TypeError, ValueError):
+                    row["related_entity_ids"] = []
+            threads.append(row)
+
     return {
         "characters": characters,
         "events": events,
+        "locations": locations,
+        "plot_threads": threads,
         "character_event_relations": ce_relations,
         "character_relations": cc_relations,
         "event_relations": ee_relations,
@@ -2004,18 +2278,21 @@ async def upsert_ai_kg_from_extraction(
     character_event_relations: List[Dict[str, Any]],
     character_relations: List[Dict[str, Any]],
     event_relations: List[Dict[str, Any]],
+    locations: Optional[List[Dict[str, Any]]] = None,
     model_id: Optional[int] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """根据单章节抽取结果, UPSERT 到项目级 KG (按 entity_id 同名合并属性).
 
     合并策略:
-    - 已存在 (project_id, entity_id): 合并 attributes (后者覆盖前者), extras 替换, source_chapter_id 追加到 extras
+    - 已存在 (project_id, entity_id): 合并 attributes (后者覆盖前者), ⑥结构化字段用新值
     - 不存在: 插入新行
     - 关系表: 同 source/target/relation 三元组视为同一条, 重复则跳过
+    - ④ Locations / ⑤ Threads / ⑩ character_appearances 走独立分支
     """
     stored: Dict[str, List[Dict[str, Any]]] = {
         "characters": [],
         "events": [],
+        "locations": [],
         "character_event_relations": [],
         "character_relations": [],
         "event_relations": [],
@@ -2037,56 +2314,95 @@ async def upsert_ai_kg_from_extraction(
             row = await cur.fetchone()
             merged_attrs = {**(c.get("attributes") or {})}
             extras = _build_entity_extras(c)
+            # ⑥ 结构化字段: 来自实体本身, 优先于 attributes
+            structured = {
+                "role": c.get("role"),
+                "faction": c.get("faction"),
+                "current_location_entity_id": c.get("current_location_entity_id"),
+                "status": c.get("status"),
+                "first_appearance_chapter_id": c.get("first_appearance_chapter_id"),
+                "importance": c.get("importance"),
+            }
+            structured = {k: v for k, v in structured.items() if v not in (None, "")}
+
             if row:
                 old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
                 merged_attrs = {**old_attrs, **merged_attrs}
                 extras["source_chapter_ids"] = list(
                     set((extras.get("source_chapter_ids") or []) + ([source_chapter_id] if source_chapter_id else []))
                 )
+                # 动态 SET 子句: 只更新有值的新结构化字段
+                set_clauses = [
+                    "name = ?",
+                    "attributes = ?",
+                    "extras = ?",
+                    "source_chapter_id = COALESCE(?, source_chapter_id)",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                params: List[Any] = [
+                    str(c.get("name", "")).strip()[:200] or entity_id,
+                    _encode_attributes(merged_attrs),
+                    _encode_extras(extras),
+                    source_chapter_id,
+                ]
+                for k, v in structured.items():
+                    set_clauses.append(f"{k} = ?")
+                    params.append(v)
+                params.append(row["id"])
                 await db.execute(
-                    """
-                    UPDATE ai_kg_characters
-                    SET name = ?, attributes = ?, extras = ?,
-                        source_chapter_id = COALESCE(?, source_chapter_id),
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (
-                        str(c.get("name", "")).strip()[:200] or entity_id,
-                        _encode_attributes(merged_attrs),
-                        _encode_extras(extras),
-                        source_chapter_id,
-                        row["id"],
-                    ),
+                    f"UPDATE ai_kg_characters SET {', '.join(set_clauses)} WHERE id = ?",
+                    params,
                 )
                 stored["characters"].append({
                     "id": row["id"], "project_id": project_id, "entity_id": entity_id,
                     "name": c.get("name", ""), "attributes": merged_attrs,
                     "source_chapter_id": source_chapter_id, "extras": extras,
+                    **structured,
                 })
             else:
                 if source_chapter_id:
                     extras["source_chapter_ids"] = [source_chapter_id]
+                cols = ["project_id", "entity_id", "name", "attributes",
+                        "source_chapter_id", "model_id", "extras"]
+                vals: List[Any] = [
+                    project_id, entity_id,
+                    str(c.get("name", "")).strip()[:200] or entity_id,
+                    _encode_attributes(merged_attrs),
+                    source_chapter_id, model_id,
+                    _encode_extras(extras),
+                ]
+                for k, v in structured.items():
+                    cols.append(k)
+                    vals.append(v)
+                placeholders = ", ".join(["?"] * len(vals))
                 cur = await db.execute(
-                    """
-                    INSERT INTO ai_kg_characters
-                        (project_id, entity_id, name, attributes,
-                         source_chapter_id, model_id, extras)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        project_id, entity_id,
-                        str(c.get("name", "")).strip()[:200] or entity_id,
-                        _encode_attributes(merged_attrs),
-                        source_chapter_id, model_id,
-                        _encode_extras(extras),
-                    ),
+                    f"INSERT INTO ai_kg_characters ({', '.join(cols)}) VALUES ({placeholders})",
+                    vals,
                 )
                 stored["characters"].append({
                     "id": cur.lastrowid, "project_id": project_id, "entity_id": entity_id,
                     "name": c.get("name", ""), "attributes": merged_attrs,
                     "source_chapter_id": source_chapter_id, "extras": extras,
+                    **structured,
                 })
+
+            # ⑩ 出场记录: 把该角色与本章的关联写入 ai_kg_character_appearances
+            if source_chapter_id:
+                try:
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO ai_kg_character_appearances
+                            (project_id, entity_id, chapter_id, role, importance)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            project_id, entity_id, source_chapter_id,
+                            str(c.get("role") or "出场")[:50],
+                            int(c.get("importance") or 2) if isinstance(c.get("importance"), (int, float)) else 2,
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("character_appearances upsert skipped for %s", entity_id)
 
         # ---- events ----
         for e in events:
@@ -2101,55 +2417,139 @@ async def upsert_ai_kg_from_extraction(
             row = await cur.fetchone()
             merged_attrs = {**(e.get("attributes") or {})}
             extras = _build_entity_extras(e)
+            structured = {
+                "in_story_time": e.get("in_story_time"),
+                "chapter_time_label": e.get("chapter_time_label"),
+                "importance": e.get("importance"),
+            }
+            structured = {k: v for k, v in structured.items() if v not in (None, "")}
+
             if row:
                 old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
                 merged_attrs = {**old_attrs, **merged_attrs}
                 extras["source_chapter_ids"] = list(
                     set((extras.get("source_chapter_ids") or []) + ([source_chapter_id] if source_chapter_id else []))
                 )
+                set_clauses = [
+                    "name = ?", "attributes = ?", "extras = ?",
+                    "source_chapter_id = COALESCE(?, source_chapter_id)",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                params: List[Any] = [
+                    str(e.get("name", "")).strip()[:200] or entity_id,
+                    _encode_attributes(merged_attrs),
+                    _encode_extras(extras),
+                    source_chapter_id,
+                ]
+                for k, v in structured.items():
+                    set_clauses.append(f"{k} = ?")
+                    params.append(v)
+                params.append(row["id"])
                 await db.execute(
-                    """
-                    UPDATE ai_kg_events
-                    SET name = ?, attributes = ?, extras = ?,
-                        source_chapter_id = COALESCE(?, source_chapter_id),
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (
-                        str(e.get("name", "")).strip()[:200] or entity_id,
-                        _encode_attributes(merged_attrs),
-                        _encode_extras(extras),
-                        source_chapter_id,
-                        row["id"],
-                    ),
+                    f"UPDATE ai_kg_events SET {', '.join(set_clauses)} WHERE id = ?",
+                    params,
                 )
                 stored["events"].append({
                     "id": row["id"], "project_id": project_id, "entity_id": entity_id,
                     "name": e.get("name", ""), "attributes": merged_attrs,
                     "source_chapter_id": source_chapter_id, "extras": extras,
+                    **structured,
+                })
+            else:
+                if source_chapter_id:
+                    extras["source_chapter_ids"] = [source_chapter_id]
+                cols = ["project_id", "entity_id", "name", "attributes",
+                        "source_chapter_id", "model_id", "extras"]
+                vals: List[Any] = [
+                    project_id, entity_id,
+                    str(e.get("name", "")).strip()[:200] or entity_id,
+                    _encode_attributes(merged_attrs),
+                    source_chapter_id, model_id,
+                    _encode_extras(extras),
+                ]
+                for k, v in structured.items():
+                    cols.append(k)
+                    vals.append(v)
+                placeholders = ", ".join(["?"] * len(vals))
+                cur = await db.execute(
+                    f"INSERT INTO ai_kg_events ({', '.join(cols)}) VALUES ({placeholders})",
+                    vals,
+                )
+                stored["events"].append({
+                    "id": cur.lastrowid, "project_id": project_id, "entity_id": entity_id,
+                    "name": e.get("name", ""), "attributes": merged_attrs,
+                    "source_chapter_id": source_chapter_id, "extras": extras,
+                    **structured,
+                })
+
+        # ---- ④ locations ----
+        for loc in locations or []:
+            entity_id = str(loc.get("entity_id") or loc.get("id") or "").strip()
+            if not entity_id:
+                continue
+            cur = await db.execute(
+                "SELECT id, attributes FROM ai_kg_locations "
+                "WHERE project_id = ? AND entity_id = ?",
+                (project_id, entity_id),
+            )
+            row = await cur.fetchone()
+            merged_attrs = {**(loc.get("attributes") or {})}
+            extras = _build_entity_extras(loc)
+            if row:
+                old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
+                merged_attrs = {**old_attrs, **merged_attrs}
+                extras["source_chapter_ids"] = list(
+                    set((extras.get("source_chapter_ids") or []) + ([source_chapter_id] if source_chapter_id else []))
+                )
+                set_clauses = [
+                    "name = ?", "attributes = ?", "extras = ?",
+                    "source_chapter_id = COALESCE(?, source_chapter_id)",
+                    "updated_at = CURRENT_TIMESTAMP",
+                ]
+                params: List[Any] = [
+                    str(loc.get("name", "")).strip()[:200] or entity_id,
+                    _encode_attributes(merged_attrs),
+                    _encode_extras(extras),
+                    source_chapter_id,
+                ]
+                if loc.get("location_type"):
+                    set_clauses.append("location_type = ?")
+                    params.append(str(loc["location_type"])[:50])
+                params.append(row["id"])
+                await db.execute(
+                    f"UPDATE ai_kg_locations SET {', '.join(set_clauses)} WHERE id = ?",
+                    params,
+                )
+                stored["locations"].append({
+                    "id": row["id"], "project_id": project_id, "entity_id": entity_id,
+                    "name": loc.get("name", ""), "attributes": merged_attrs,
+                    "source_chapter_id": source_chapter_id, "extras": extras,
+                    "location_type": loc.get("location_type"),
                 })
             else:
                 if source_chapter_id:
                     extras["source_chapter_ids"] = [source_chapter_id]
                 cur = await db.execute(
                     """
-                    INSERT INTO ai_kg_events
-                        (project_id, entity_id, name, attributes,
+                    INSERT INTO ai_kg_locations
+                        (project_id, entity_id, name, location_type, attributes,
                          source_chapter_id, model_id, extras)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id, entity_id,
-                        str(e.get("name", "")).strip()[:200] or entity_id,
+                        str(loc.get("name", "")).strip()[:200] or entity_id,
+                        str(loc.get("location_type") or "")[:50] or None,
                         _encode_attributes(merged_attrs),
                         source_chapter_id, model_id,
                         _encode_extras(extras),
                     ),
                 )
-                stored["events"].append({
+                stored["locations"].append({
                     "id": cur.lastrowid, "project_id": project_id, "entity_id": entity_id,
-                    "name": e.get("name", ""), "attributes": merged_attrs,
+                    "name": loc.get("name", ""), "attributes": merged_attrs,
                     "source_chapter_id": source_chapter_id, "extras": extras,
+                    "location_type": loc.get("location_type"),
                 })
 
         # ---- relations: 去重插入 ----
@@ -2173,7 +2573,14 @@ async def upsert_ai_kg_from_extraction(
                     "relation", "source_chapter_id", "extras"]
             vals: List[Any] = [project_id, source, target, relation,
                                source_chapter_id, _encode_extras(extras)]
+            # ⑥ 关系结构化字段: relation_type
+            rtype = extras_payload.get("relation_type")
+            if rtype:
+                cols.append("relation_type")
+                vals.append(str(rtype)[:50])
             for k, v in extra.items():
+                if k in cols:
+                    continue
                 cols.append(k)
                 vals.append(v)
             placeholders = ", ".join(["?"] * len(vals))
@@ -2245,12 +2652,326 @@ async def upsert_ai_kg_from_extraction(
     return stored
 
 
+async def upsert_ai_kg_plot_threads(
+    project_id: int,
+    *,
+    source_chapter_id: Optional[int],
+    threads: List[Dict[str, Any]],
+    model_id: Optional[int] = None,
+) -> Dict[str, int]:
+    """⑤ plot_threads 批量 upsert. action=create|update|resolve|drop."""
+    counts = {"create": 0, "update": 0, "resolve": 0, "drop": 0, "skip": 0}
+    if not threads:
+        return counts
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        for t in threads:
+            thread_id = str(t.get("thread_id") or "").strip()
+            action = str(t.get("action") or "create").strip()
+            title = str(t.get("title") or "").strip()
+            if not thread_id or not title:
+                counts["skip"] += 1
+                continue
+            cur = await db.execute(
+                "SELECT id, status, priority, thread_type, related_entity_ids, notes "
+                "FROM ai_kg_plot_threads WHERE project_id = ? AND thread_id = ?",
+                (project_id, thread_id),
+            )
+            row = await cur.fetchone()
+            status = str(t.get("status") or "open").strip()
+            if action == "drop":
+                if row:
+                    await db.execute(
+                        "DELETE FROM ai_kg_plot_threads WHERE id = ?", (row["id"],)
+                    )
+                    counts["drop"] += 1
+                else:
+                    counts["skip"] += 1
+                continue
+            if action == "resolve" and row:
+                await db.execute(
+                    """
+                    UPDATE ai_kg_plot_threads
+                    SET status = 'resolved',
+                        resolved_chapter_id = COALESCE(?, resolved_chapter_id),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (source_chapter_id, row["id"]),
+                )
+                counts["resolve"] += 1
+                continue
+            priority = t.get("priority")
+            try:
+                priority_v = max(1, min(5, int(priority))) if priority not in (None, "") else 3
+            except (TypeError, ValueError):
+                priority_v = 3
+            related = t.get("related_entity_ids") or []
+            if isinstance(related, str):
+                try:
+                    related = json.loads(related)
+                except (TypeError, ValueError):
+                    related = []
+            related_str = json.dumps(related, ensure_ascii=False) if related else None
+            notes = str(t.get("notes") or "")[:1000] or None
+            ttype = str(t.get("thread_type") or "")[:50] or None
+            if row:
+                # update
+                await db.execute(
+                    """
+                    UPDATE ai_kg_plot_threads
+                    SET title = ?, status = ?, priority = ?, thread_type = COALESCE(?, thread_type),
+                        related_entity_ids = COALESCE(?, related_entity_ids),
+                        notes = COALESCE(?, notes),
+                        source_chapter_id = COALESCE(?, source_chapter_id),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (title, status, priority_v, ttype, related_str, notes, source_chapter_id, row["id"]),
+                )
+                counts["update"] += 1
+            else:
+                # create
+                await db.execute(
+                    """
+                    INSERT INTO ai_kg_plot_threads
+                        (project_id, thread_id, title, thread_type, status, priority,
+                         introduced_chapter_id, related_entity_ids, notes,
+                         source_chapter_id, model_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id, thread_id, title, ttype, status, priority_v,
+                        source_chapter_id, related_str, notes,
+                        source_chapter_id, model_id,
+                    ),
+                )
+                counts["create"] += 1
+        await db.commit()
+    return counts
+
+
+async def list_ai_kg_plot_threads(
+    project_id: int,
+    *,
+    status: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    threads: List[Dict[str, Any]] = []
+    async with get_db() as db:
+        sql = """
+            SELECT id, project_id, thread_id, title, thread_type, status, priority,
+                   introduced_chapter_id, resolved_chapter_id, related_entity_ids,
+                   notes, source_chapter_id, model_id, created_at, updated_at
+            FROM ai_kg_plot_threads
+            WHERE project_id = ?
+        """
+        params: List[Any] = [project_id]
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY priority DESC, created_at ASC"
+        cur = await db.execute(sql, tuple(params))
+        rows = await cur.fetchall()
+    for r in rows:
+        row = dict(r)
+        if row.get("related_entity_ids"):
+            try:
+                row["related_entity_ids"] = json.loads(row["related_entity_ids"])
+            except (TypeError, ValueError):
+                row["related_entity_ids"] = []
+        threads.append(row)
+    return threads
+
+
+async def list_ai_kg_locations(project_id: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT id, project_id, entity_id, name, location_type, attributes,
+                   source_chapter_id, model_id, extras, created_at, updated_at
+            FROM ai_kg_locations WHERE project_id = ?
+            ORDER BY name
+            """,
+            (project_id,),
+        )
+        rows = await cur.fetchall()
+    for r in rows:
+        row = dict(r)
+        row["attributes"] = _decode_attributes(row.get("attributes"))
+        row["extras"] = _decode_extras(row.get("extras"))
+        out.append(row)
+    return out
+
+
+async def list_ai_kg_character_appearances(
+    project_id: int,
+    *,
+    entity_id: Optional[str] = None,
+    chapter_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    where = ["project_id = ?"]
+    params: List[Any] = [project_id]
+    if entity_id:
+        where.append("entity_id = ?")
+        params.append(entity_id)
+    if chapter_id:
+        where.append("chapter_id = ?")
+        params.append(chapter_id)
+    async with get_db() as db:
+        cur = await db.execute(
+            f"""
+            SELECT id, project_id, entity_id, chapter_id, role, importance, created_at
+            FROM ai_kg_character_appearances
+            WHERE {' AND '.join(where)}
+            ORDER BY chapter_id ASC
+            """,
+            tuple(params),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def update_ai_chapter_kg_extraction(
+    variant_id: int,
+    *,
+    entity_count: int,
+    event_count: int,
+) -> None:
+    """① 抽取后更新变体的 kg_extracted_at + 计数."""
+    async with get_db() as db:
+        await db.execute(
+            """
+            UPDATE ai_chapter_variants
+            SET kg_extracted_at = CURRENT_TIMESTAMP,
+                kg_entity_count = ?,
+                kg_event_count = ?
+            WHERE id = ?
+            """,
+            (int(entity_count), int(event_count), int(variant_id)),
+        )
+        await db.commit()
+
+
+async def update_ai_chapter_compass(
+    chapter_id: int,
+    *,
+    score: Optional[float] = None,
+    warnings: Optional[List[Dict[str, str]]] = None,
+    summary: Optional[str] = None,
+) -> None:
+    """⑦ CompassAgent 评分入档."""
+    sets: List[str] = []
+    params: List[Any] = []
+    if score is not None:
+        sets.append("compass_score = ?")
+        params.append(float(score))
+    if warnings is not None:
+        sets.append("compass_warnings = ?")
+        params.append(json.dumps(warnings, ensure_ascii=False))
+    if summary is not None:
+        sets.append("compass_summary = ?")
+        params.append(str(summary)[:2000])
+    if not sets:
+        return
+    params.append(int(chapter_id))
+    async with get_db() as db:
+        await db.execute(
+            f"UPDATE ai_chapters SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+        await db.commit()
+
+
+async def update_ai_project_themes(
+    project_id: int,
+    themes: List[Dict[str, Any]],
+) -> None:
+    """⑨ 更新项目级主题进度. themes = [{theme, progress(0-1), stage}, ...]"""
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE ai_projects SET themes_progress = ? WHERE id = ?",
+            (json.dumps(themes, ensure_ascii=False), int(project_id)),
+        )
+        await db.commit()
+
+
+async def get_ai_project_themes(project_id: int) -> List[Dict[str, Any]]:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT themes_progress FROM ai_projects WHERE id = ?",
+            (project_id,),
+        )
+        row = await cur.fetchone()
+    if not row or not row["themes_progress"]:
+        return []
+    try:
+        return json.loads(row["themes_progress"])
+    except (TypeError, ValueError):
+        return []
+
+
+async def reconcile_kg_conflicts(
+    project_id: int,
+    *,
+    chapter_id: int,
+    conflicts: List[Dict[str, Any]],
+) -> int:
+    """② Critic 报告的 kg_conflicts 写回对应实体的 attributes.conflicts_observed.
+
+    conflicts = [{entity, entity_type, claim, kg_fact, severity, chapter_no}, ...]
+    返回写入的冲突数.
+    """
+    if not conflicts:
+        return 0
+    written = 0
+    async with get_db() as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+        for c in conflicts:
+            entity = (c.get("entity") or "").strip()
+            entity_type = (c.get("entity_type") or "character").strip() or "character"
+            if not entity:
+                continue
+            table = "ai_kg_characters" if entity_type == "character" else "ai_kg_events"
+            cur = await db.execute(
+                f"SELECT id, attributes, name FROM {table} "
+                f"WHERE project_id = ? AND name = ? ORDER BY id LIMIT 1",
+                (project_id, entity),
+            )
+            row = await cur.fetchone()
+            if not row:
+                continue
+            old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
+            arr = old_attrs.get("conflicts_observed") or []
+            if not isinstance(arr, list):
+                arr = []
+            arr.append({
+                "chapter_no": c.get("chapter_no") or chapter_id,
+                "chapter_id": chapter_id,
+                "quote": str(c.get("quote") or c.get("claim") or "")[:200],
+                "kg_fact": str(c.get("kg_fact") or "")[:200],
+                "severity": str(c.get("severity") or "warn"),
+                "resolved": False,
+            })
+            old_attrs["conflicts_observed"] = arr
+            await db.execute(
+                f"UPDATE {table} SET attributes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (_encode_attributes(old_attrs), row["id"]),
+            )
+            written += 1
+        await db.commit()
+    return written
+
+
 async def delete_ai_knowledge_graph(project_id: int) -> Dict[str, int]:
     """原子清空项目级 KG."""
     counts: Dict[str, int] = {}
     async with get_db() as db:
         await db.execute("PRAGMA foreign_keys = ON")
         for table in (
+            "ai_kg_character_appearances",
+            "ai_kg_plot_threads",
+            "ai_kg_locations",
             "ai_kg_character_event_relations",
             "ai_kg_character_relations",
             "ai_kg_event_relations",
@@ -2278,24 +2999,27 @@ async def get_ai_kg_stats(project_id: int) -> Dict[str, int]:
         )
         evt_count = (await cur.fetchone())[0]
         cur = await db.execute(
-            "SELECT COUNT(*) FROM ai_kg_character_event_relations WHERE project_id = ?",
+            "SELECT COUNT(*) FROM ai_kg_locations WHERE project_id = ?",
             (project_id,),
         )
-        ce_count = (await cur.fetchone())[0]
+        loc_count = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM ai_kg_plot_threads "
+            "WHERE project_id = ? AND status IN ('open', 'hinting', 'resolving')",
+            (project_id,),
+        )
+        thread_open = (await cur.fetchone())[0]
         cur = await db.execute(
             "SELECT COUNT(*) FROM ai_kg_character_relations WHERE project_id = ?",
             (project_id,),
         )
         cc_count = (await cur.fetchone())[0]
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM ai_kg_event_relations WHERE project_id = ?",
-            (project_id,),
-        )
-        ee_count = (await cur.fetchone())[0]
     return {
-        "characters": char_count, "events": evt_count,
-        "participations": ce_count, "character_relations": cc_count,
-        "event_relations": ee_count,
+        "characters": char_count,
+        "events": evt_count,
+        "locations": loc_count,
+        "threads_open": thread_open,
+        "character_relations": cc_count,
     }
 
 

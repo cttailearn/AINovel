@@ -470,11 +470,31 @@ export const api = {
       apiRequest(`/creation/chapters/${chapterId}/confirm`, {
         method: 'POST', ...options,
       }),
+    deleteChapter: (chapterId, options) =>
+      apiRequest(`/creation/chapters/${chapterId}`, {
+        method: 'DELETE', ...options,
+      }),
+    // 导出章节: 返回 { url, filename } 用于触发浏览器下载
+    exportChapterUrl: (chapterId, format = 'txt') =>
+      `${API_PREFIX}/creation/chapters/${chapterId}/export?format=${encodeURIComponent(format)}`,
     // 生成 (SSE)
     generate: (projectId, payload, { onEvent, signal } = {}) =>
       postStream(`/creation/projects/${projectId}/chapters/generate`, payload, {
         onEvent,
         signal,
+      }),
+    // 新建项目引导式问答 (Intake wizard)
+    intakeNext: (payload, options) =>
+      apiRequest('/creation/intake/next', {
+        method: 'POST',
+        body: payload,
+        ...options,
+      }),
+    intakeSynthesize: (payload, options) =>
+      apiRequest('/creation/intake/synthesize', {
+        method: 'POST',
+        body: payload,
+        ...options,
       }),
   },
 };

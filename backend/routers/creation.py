@@ -11,8 +11,8 @@ import json
 import logging
 from typing import Any, AsyncIterator, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response, StreamingResponse
 
 from schemas import (
     AiChapterContentUpdate,
@@ -20,12 +20,16 @@ from schemas import (
     AiChapterGenerateRequest,
     AiChapterListResponse,
     AiChapterSelectRequest,
+    AiIntakeNextRequest,
+    AiIntakeNextResponse,
+    AiIntakeSynthesizeRequest,
+    AiIntakeSynthesizeResponse,
     AiProjectCreate,
     AiProjectDetailResponse,
     AiProjectListResponse,
     AiProjectUpdate,
 )
-from services import creation_service
+from services import creation_intake_service, creation_service
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +97,54 @@ async def delete_project(project_id: int):
 
 
 # ---------------------------------------------------------------------------
+# 新建项目引导式问答 (Intake wizard)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/intake/synthesize",
+    response_model=AiIntakeSynthesizeResponse,
+)
+async def intake_synthesize(payload: AiIntakeSynthesizeRequest):
+    """把引导式问答结果交给 LLM, 综合为可一键建项的项目草稿.
+
+    LLM 不可用 / 输出非法 JSON 时, 仍会走本地兜底返回一份可用的草稿,
+    因此该接口在系统配置基本正确的前提下不应抛 5xx.
+    """
+    try:
+        return await creation_intake_service.synthesize_project(payload)
+    except creation_intake_service.IntakeError as exc:
+        # 真正致命: 没有可用模型且兜底也无法生成
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("intake synthesize crashed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail=f"综合项目草稿失败: {exc}"
+        ) from exc
+
+
+@router.post(
+    "/intake/next",
+    response_model=AiIntakeNextResponse,
+)
+async def intake_next(payload: AiIntakeNextRequest):
+    """根据已完成的问答历史, 让 LLM 动态生成下一道题 (4~8 个差异化选项).
+
+    不可恢复错误只发生在 ``items`` 字段类型错乱时; LLM 不可用 / 输出非法 JSON
+    / 模型无响应时, 会走本地兜底题库, 接口仍能正常返回下一题或 done 信号.
+    """
+    try:
+        return await creation_intake_service.generate_next_question(payload)
+    except creation_intake_service.IntakeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("intake next crashed: %s", exc)
+        raise HTTPException(
+            status_code=500, detail=f"生成下一题失败: {exc}"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
 # Knowledge graph (project-level)
 # ---------------------------------------------------------------------------
 
@@ -138,6 +190,61 @@ async def get_chapter(chapter_id: int):
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"chapter": ch}
+
+
+@router.delete("/chapters/{chapter_id}")
+async def delete_chapter(chapter_id: int):
+    """删除单个章节 (含变体). 会回退 project.current_chapter_no 避免空号."""
+    ok = await creation_service.delete_chapter(chapter_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"章节 {chapter_id} 不存在")
+    return {"ok": True}
+
+
+@router.get("/chapters/{chapter_id}/export")
+async def export_chapter(
+    chapter_id: int,
+    format: str = Query("txt", pattern="^(txt|md)$"),
+):
+    """把章节正文导出为可下载的纯文本 (.txt) / Markdown (.md)."""
+    try:
+        detail = await creation_service.get_chapter_detail(chapter_id)
+    except creation_service.CreationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        body = await creation_service.export_chapter_as_text(chapter_id)
+    except creation_service.CreationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # 文件名: ASCII 兜底 (latin-1 兼容) + RFC 5987 中文名
+    project = detail.get("project_id")
+    ch = detail
+    title = ch.get("title") or f"第 {ch.get('chapter_no')} 章"
+    chapter_no = int(ch.get("chapter_no") or 0)
+    safe = (title or f"第{chapter_no:03d}章").replace("/", "_").replace("\\", "_")[:80]
+    filename = f"ch{chapter_no:03d}_{safe}.{format}"
+    # ASCII 兜底 (只允许 [a-zA-Z0-9._-], 其余替换为 _)
+    import re as _re
+    ascii_fallback = _re.sub(r"[^A-Za-z0-9._-]+", "_", filename) or f"chapter.{format}"
+    # RFC 5987: filename*=UTF-8''urlencoded
+    from urllib.parse import quote as _quote
+    filename_star = _quote(filename, safe="")
+
+    # BOM 让 Windows 记事本识别 UTF-8
+    content_bytes = (b"\xef\xbb\xbf" + body.encode("utf-8")) if format == "txt" else body.encode("utf-8")
+    media_type = "text/plain; charset=utf-8" if format == "txt" else "text/markdown; charset=utf-8"
+
+    return Response(
+        content=content_bytes,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_fallback}"; '
+                f"filename*=UTF-8''{filename_star}"
+            ),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post(

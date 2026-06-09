@@ -665,6 +665,41 @@ class AiProjectDetailResponse(BaseModel):
     project: AiProjectOut
     chapters: List["AiChapterOut"] = []
     kg_stats: Dict[str, int] = Field(default_factory=dict)
+    # ④ locations / ⑤ plot_threads / ⑨ themes_progress
+    locations: List[Dict[str, Any]] = Field(default_factory=list)
+    plot_threads: List[Dict[str, Any]] = Field(default_factory=list)
+    themes_progress: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class AiLocationOut(BaseModel):
+    id: int
+    project_id: int
+    entity_id: str
+    name: str
+    location_type: Optional[str] = None
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+    source_chapter_id: Optional[int] = None
+
+
+class AiPlotThreadOut(BaseModel):
+    id: int
+    project_id: int
+    thread_id: str
+    title: str
+    thread_type: Optional[str] = None
+    status: str
+    priority: int
+    introduced_chapter_id: Optional[int] = None
+    resolved_chapter_id: Optional[int] = None
+    related_entity_ids: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class AiCompassOut(BaseModel):
+    chapter_id: int
+    score: Optional[float] = None
+    warnings: List[Dict[str, str]] = Field(default_factory=list)
+    summary: Optional[str] = None
 
 
 class AiChapterOut(BaseModel):
@@ -678,6 +713,12 @@ class AiChapterOut(BaseModel):
     final_content: Optional[str] = None
     word_count: int
     kg_extracted: int
+    # ⑦ Compass 字段
+    compass_score: Optional[float] = None
+    compass_warnings: List[Dict[str, str]] = Field(default_factory=list)
+    compass_summary: Optional[str] = None
+    # ④ 当前主场景
+    current_location: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     confirmed_at: Optional[str] = None
@@ -721,6 +762,81 @@ class AiChapterSelectRequest(BaseModel):
 
 class AiChapterContentUpdate(BaseModel):
     content: str = Field(..., min_length=0)
+
+
+# ---------------------------------------------------------------------------
+# 新建项目引导式问答 (Intake wizard)
+# ---------------------------------------------------------------------------
+
+
+class AiIntakeHistoryItem(BaseModel):
+    """引导式问答中**已完成**的一步.
+
+    * ``question``    该步的问题文本
+    * ``options``     AI 给出的候选选项 (顺序与展示一致)
+    * ``choice``      用户最终的选择. 单选=字符串; 多选=字符串列表; 未选=空.
+    * ``custom_text`` 用户在「其它 / 自定义」中输入的补充. 可为空.
+    * ``multiple``    该题是否允许多选
+    * ``is_seed``     是否为初始静态种子题 (例如开局先问一句"想写什么类型")
+    """
+
+    question: str = Field(..., min_length=1, max_length=500)
+    options: List[str] = Field(default_factory=list)
+    choice: Optional[Any] = None
+    custom_text: Optional[str] = Field(default="", max_length=2000)
+    multiple: bool = False
+    is_seed: bool = False
+
+
+class AiIntakeNextRequest(BaseModel):
+    """请求下一道题. ``items`` 是已完成的步骤历史 (可为空, 表示第 1 题)."""
+
+    items: List[AiIntakeHistoryItem] = Field(default_factory=list)
+    # 前端兜底: 如果不希望 AI 退出, 可强制不出 done. 当前实现忽略.
+    model_id: Optional[int] = Field(default=None, ge=1)
+    # 采样温度 (覆盖 prompt 模板默认). None=沿用模板.
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    # 单次回复 token 上限 (覆盖 prompt 模板默认). None=沿用模板.
+    max_tokens: Optional[int] = Field(default=None, ge=64, le=32_000)
+
+
+class AiIntakeNextResponse(BaseModel):
+    """下一道题 (或 done 信号)."""
+
+    question: str = ""
+    description: str = ""
+    options: List[str] = Field(default_factory=list)
+    multiple: bool = False
+    allow_custom: bool = True
+    # True = 后端认为已收集足够信息, 前端应跳到 synthesize
+    done: bool = False
+    # 诊断信息
+    model_name: Optional[str] = None
+    raw: Optional[str] = None
+
+
+class AiIntakeSynthesizeRequest(BaseModel):
+    """调用 LLM 把引导问答历史综合成可建项的项目草稿."""
+
+    items: List[AiIntakeHistoryItem] = Field(..., min_length=1)
+    model_id: Optional[int] = Field(default=None, ge=1)
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(default=None, ge=64, le=32_000)
+
+
+class AiIntakeSynthesizeResponse(BaseModel):
+    """后端综合生成的项目草稿, 字段直接对应 ``AiProjectCreate``."""
+
+    title: str = ""
+    genre: str = ""
+    worldview: str = ""
+    outline: str = ""
+    initial_concepts: List[Dict[str, Any]] = Field(default_factory=list)
+    style_pref: Dict[str, Any] = Field(default_factory=dict)
+    model_id: Optional[int] = None
+    # 透传给前端的诊断信息, 便于排查
+    model_name: Optional[str] = None
+    raw: Optional[str] = None
 
 
 class AiKGSummary(BaseModel):

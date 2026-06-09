@@ -124,30 +124,45 @@ async def _call_llm(
     *,
     model_cfg: Dict[str, Any],
     prompt_key: str,
-    user_prompt: str,
+    template_vars: Dict[str, Any],
     fallback_user_prompt: str = "",
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
 ) -> str:
-    """统一 LLM 调用: 解析 prompt → 调 ai_service → 返回 content 字符串."""
+    """统一 LLM 调用: 解析 prompt → 调 ai_service → 返回 content 字符串.
+
+    ``template_vars`` 必须是 dict (与模板里的 ``{key}`` 占位符一一对应).
+    历史原因: 之前传 ``user_prompt`` 是 JSON 字符串, 但 ``format_map`` 拿它当 dict
+    查表, 导致 ``_SafeDict.__missing__`` 永远命中, 模板里所有占位符都被替换为 "".
+    现在强制传 dict, 保证 LLM 真正拿到项目设定.
+    """
+    if not isinstance(template_vars, dict):
+        raise TypeError(
+            f"template_vars 必须是 dict, 实际是 {type(template_vars).__name__}"
+        )
     tmpl = await _resolve_prompt(prompt_key)
     system_prompt = tmpl.get("system_prompt", "") or ""
     raw_user_tmpl = tmpl.get("user_prompt_template", "") or fallback_user_prompt
-    try:
-        temperature = float(tmpl.get("temperature") or 0.5)
-    except (TypeError, ValueError):
-        temperature = 0.5
-    try:
-        max_tokens = int(tmpl.get("max_tokens") or 2400)
-    except (TypeError, ValueError):
-        max_tokens = 2400
+    # 调用方覆盖 > prompt 模板默认 > 内置默认
+    if temperature is None:
+        try:
+            temperature = float(tmpl.get("temperature") or 0.5)
+        except (TypeError, ValueError):
+            temperature = 0.5
+    if max_tokens is None:
+        try:
+            max_tokens = int(tmpl.get("max_tokens") or 2400)
+        except (TypeError, ValueError):
+            max_tokens = 2400
     if raw_user_tmpl and "{" in raw_user_tmpl:
         try:
-            user_prompt_resolved = raw_user_tmpl.format_map(_SafeDict(user_prompt))
+            user_prompt_resolved = raw_user_tmpl.format_map(_SafeDict(template_vars))
         except Exception as exc:  # noqa: BLE001
             logger.warning("prompt.format failed for %s: %s", prompt_key, exc)
             user_prompt_resolved = raw_user_tmpl
     else:
-        # 没有模板时, 直接把 user_prompt 作为整段输入
-        user_prompt_resolved = user_prompt
+        # 没有模板占位符时, 把 dict 序列化成 YAML 风格的 key: value 当成 user prompt
+        user_prompt_resolved = _dict_to_plain_text(template_vars)
 
     try:
         return await ai_service.chat_completion(
@@ -163,6 +178,21 @@ async def _call_llm(
         )
     except Exception as exc:  # noqa: BLE001
         raise AgentCallError(f"{prompt_key} LLM 调用失败: {exc}") from exc
+
+
+def _dict_to_plain_text(d: Dict[str, Any]) -> str:
+    """把 dict 序列化成 key: value 形式 (供没有模板占位符的 prompt 使用)."""
+    lines: List[str] = []
+    for k, v in d.items():
+        if v is None or v == "":
+            continue
+        if isinstance(v, (dict, list)):
+            try:
+                v = json.dumps(v, ensure_ascii=False)
+            except (TypeError, ValueError):
+                v = str(v)
+        lines.append(f"{k}: {v}")
+    return "\n".join(lines)
 
 
 class _SafeDict(dict):
@@ -240,7 +270,7 @@ class PlannerAgent:
             raw = await _call_llm(
                 model_cfg=model_cfg,
                 prompt_key="creation.planner.direction",
-                user_prompt=prompt_str,
+                template_vars=vars_payload,
             )
         except AgentCallError as exc:
             logger.warning("planner LLM failed, using fallback: %s", exc)
@@ -324,6 +354,73 @@ class PlannerAgent:
 
 
 # ---------------------------------------------------------------------------
+# ChapterTitleAgent — 章节标题生成 (在 Planner 之后, Writer 之前调用)
+# ---------------------------------------------------------------------------
+
+
+async def generate_chapter_title(
+    *,
+    model_cfg: Dict[str, Any],
+    project_title: str,
+    directions: List[PlannerDirection],
+    chapter_no: int,
+    user_intent: str,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """综合 Planner 给定的 3 个方向, 提炼一个能代表本章核心的章节级标题.
+
+    返回清洗过的标题 (≤18 字). 失败时返回空串 (调用方决定如何兜底).
+    """
+    if not directions:
+        return ""
+    directions_block = "\n".join(
+        f"- 方向 {i + 1} · 标题: {d.title}\n"
+        f"    梗概: {d.synopsis or '(无)'}\n"
+        f"    核心事件: {d.key_event or '(无)'}\n"
+        f"    侧重点: {d.focus or '(无)'}"
+        for i, d in enumerate(directions)
+    )
+    vars_payload = {
+        "project_title": project_title or "",
+        "chapter_no": str(chapter_no),
+        "directions_block": directions_block,
+        "user_intent": user_intent or "(无额外意图)",
+    }
+    try:
+        raw = await _call_llm(
+            model_cfg=model_cfg,
+            prompt_key="creation.writer.chapter_title",
+            template_vars=vars_payload,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("chapter_title LLM failed: %s", exc)
+        return ""
+    parsed = _extract_json(raw)
+    if isinstance(parsed, dict):
+        title = str(parsed.get("title") or "").strip()
+    else:
+        # 兜底: 直接从 raw 提取第一行非空文本
+        for line in (raw or "").splitlines():
+            line = line.strip().strip("\"'` ")
+            if line and len(line) <= 30 and not line.startswith(("{", "[", "#", "##", "**")):
+                title = line
+                break
+        else:
+            title = ""
+    # 清理: 去掉「第N章」「Chapter N」等前缀
+    title = re.sub(r"^\s*第[一二三四五六七八九十百千零0-9]+章\s*[:：、\.]?\s*", "", title)
+    title = re.sub(r"^\s*Chapter\s+\d+\s*[:：、\.]?\s*", "", title, flags=re.IGNORECASE)
+    title = title.strip().strip("\"'`「」《》").strip()
+    # 截断到 18 字
+    if len(title) > 18:
+        title = title[:18]
+    return title or f"第 {chapter_no} 章"
+
+
+# ---------------------------------------------------------------------------
 # WriterAgent — 执行 Agent
 # ---------------------------------------------------------------------------
 
@@ -341,6 +438,7 @@ class WriterAgent:
         last_chapter_tail: str,
         user_intent: str,
         chapter_no: int,
+        chapter_title: str = "",
     ) -> WriterOutput:
         vars_payload = {
             "project_title": project.get("title", ""),
@@ -349,6 +447,7 @@ class WriterAgent:
             "style_pref": json.dumps(
                 project.get("style_pref") or {}, ensure_ascii=False
             ),
+            "chapter_title": chapter_title or f"第 {chapter_no} 章",
             "last_chapter_tail": last_chapter_tail or "(无前文, 直接开始)",
             "kg_context": kg_context or "(暂无知识图谱)",
             "direction_title": direction.title,
@@ -367,7 +466,7 @@ class WriterAgent:
             raw = await _call_llm(
                 model_cfg=model_cfg,
                 prompt_key="creation.writer.chapter",
-                user_prompt=prompt_str,
+                template_vars=vars_payload,
             )
         except AgentCallError as exc:
             logger.warning("writer LLM failed: %s", exc)
@@ -449,7 +548,7 @@ class CriticAgent:
             raw = await _call_llm(
                 model_cfg=model_cfg,
                 prompt_key="creation.critic.review",
-                user_prompt=prompt_str,
+                template_vars=vars_payload,
             )
         except AgentCallError as exc:
             logger.warning("critic LLM failed: %s", exc)
@@ -534,7 +633,7 @@ class EntityExtractor:
             raw = await _call_llm(
                 model_cfg=model_cfg,
                 prompt_key="creation.extractor.entity",
-                user_prompt=prompt_str,
+                template_vars=vars_payload,
             )
         except AgentCallError as exc:
             logger.warning("extractor LLM failed: %s", exc)
@@ -577,34 +676,109 @@ class EntityExtractor:
 # ---------------------------------------------------------------------------
 
 
-def serialize_kg_for_prompt(kg: Dict[str, List[Dict[str, Any]]]) -> str:
-    """把项目级 KG 压缩成 Planner/Writer 友好的简短文本."""
-    chars = kg.get("characters") or []
-    events = kg.get("events") or []
-    char_rels = kg.get("character_relations") or []
-    char_event_rels = kg.get("character_event_relations") or []
-    event_rels = kg.get("event_relations") or []
+def serialize_kg_for_prompt(
+    kg: Dict[str, List[Dict[str, Any]]],
+    *,
+    planner_directions: Optional[List[Dict[str, Any]]] = None,
+    last_chapter_content: str = "",
+    outline: str = "",
+    last_directions: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """把项目级 KG 压缩成 Planner/Writer 友好的简短文本.
+
+    ③ RAG 排序: 人物/事件/地点按相关度 top-30, 关系跟着实体裁剪.
+    ⑥ 结构化字段: importance/role/status/time_label 等直接序列化, 替代旧版 JSON 反解.
+    ④ Locations: 单独成段.
+    ⑤ Threads: 列出 open / hinting 线索, 提示 Writer 推进/回收.
+    ② Warnings: 未解决冲突 + LLM 已知冲突 合并列出, 高优先级提醒.
+    """
+    # ③ 排序 + top-K
+    from services.kg_ranker import rank_kg, _kg_warnings_for_prompt
+    ranked = rank_kg(
+        kg,
+        planner_directions=planner_directions,
+        last_chapter_content=last_chapter_content,
+        outline=outline,
+        last_directions=last_directions,
+    )
+
+    chars = ranked.get("characters") or []
+    events = ranked.get("events") or []
+    locations = ranked.get("locations") or []
+    char_rels = ranked.get("character_relations") or []
+    char_event_rels = ranked.get("character_event_relations") or []
+    event_rels = ranked.get("event_relations") or []
 
     parts: List[str] = []
+
+    # ② 已知冲突 — 给 LLM 一个硬性提醒
+    warnings_text = _kg_warnings_for_prompt(kg)
+    if warnings_text and warnings_text != "(无)":
+        parts.append("## ⚠ 已知冲突 (本章必须回填或避开)")
+        parts.append(warnings_text)
+
     if chars:
-        parts.append("## 已知人物")
-        for c in chars[:20]:
+        parts.append("## 已知人物 (按相关度排序)")
+        for c in chars:
             name = c.get("name") or c.get("entity_id", "")
+            role = c.get("role")
+            status = c.get("status")
+            faction = c.get("faction")
+            importance = c.get("importance")
             attrs = c.get("attributes") or {}
-            attr_str = "; ".join(f"{k}={v}" for k, v in attrs.items()) if attrs else ""
-            line = f"- {name}"
-            if attr_str:
-                line += f" ({attr_str})"
+            line = f"- **{name}**"
+            meta = []
+            if role:
+                meta.append(f"角色={role}")
+            if status:
+                meta.append(f"状态={status}")
+            if faction:
+                meta.append(f"势力={faction}")
+            if importance:
+                meta.append(f"重要度={importance}")
+            if meta:
+                line += f" ({'; '.join(meta)})"
+            if attrs:
+                # 取前 5 个属性
+                attr_items = list(attrs.items())[:5]
+                attr_str = "; ".join(f"{k}={v}" for k, v in attr_items)
+                line += f" — {attr_str}"
             parts.append(line)
     if events:
-        parts.append("\n## 关键事件")
-        for e in events[:15]:
+        parts.append("\n## 关键事件 (按时间顺序)")
+        for e in events:
             name = e.get("name") or e.get("entity_id", "")
+            in_story_time = e.get("in_story_time")
+            chapter_time_label = e.get("chapter_time_label")
             attrs = e.get("attributes") or {}
-            attr_str = "; ".join(f"{k}={v}" for k, v in attrs.items()) if attrs else ""
             line = f"- {name}"
-            if attr_str:
-                line += f" ({attr_str})"
+            meta = []
+            if in_story_time:
+                meta.append(f"故事内时间: {in_story_time}")
+            if chapter_time_label:
+                meta.append(f"章内时间: {chapter_time_label}")
+            if attrs:
+                loc = attrs.get("地点") or attrs.get("location")
+                if loc:
+                    meta.append(f"地点: {loc}")
+            if meta:
+                line += f" 〔{'; '.join(meta)}〕"
+            parts.append(line)
+    if locations:
+        parts.append("\n## 已知地点")
+        for l in locations:
+            name = l.get("name") or l.get("entity_id", "")
+            ltype = l.get("location_type")
+            attrs = l.get("attributes") or {}
+            ctrl = attrs.get("控制势力") or attrs.get("controller")
+            line = f"- {name}"
+            meta = []
+            if ltype:
+                meta.append(f"类型={ltype}")
+            if ctrl:
+                meta.append(f"控制: {ctrl}")
+            if meta:
+                line += f" ({'; '.join(meta)})"
             parts.append(line)
     if char_rels:
         parts.append("\n## 人物关系")
@@ -622,9 +796,588 @@ def serialize_kg_for_prompt(kg: Dict[str, List[Dict[str, Any]]]) -> str:
     if event_rels:
         parts.append("\n## 事件-事件")
         for r in event_rels[:10]:
+            t = r.get("relation_type") or ""
             parts.append(
-                f"- {r.get('source_entity_id', '')} --[{r.get('relation', '')}]--> {r.get('target_entity_id', '')}"
+                f"- {r.get('source_entity_id', '')} --[{r.get('relation', '')}{(' / ' + t) if t else ''}]--> {r.get('target_entity_id', '')}"
             )
     if not parts:
         return ""
     return "\n".join(parts).strip()
+
+
+# ---------------------------------------------------------------------------
+# ⑥ Schema 校验 — 抽取出来的实体在入库前先过滤
+# ---------------------------------------------------------------------------
+
+# 人物结构化字段: 必填 + 可选
+CHAR_ALLOWED = {
+    # 必填 (role/status/importance)
+    "role", "status", "importance",
+    # 可选
+    "faction", "current_location_entity_id", "first_appearance_chapter_id",
+    # 自由 attributes
+    "attributes",
+    # 标识
+    "entity_id", "name",
+}
+CHAR_IMPORTANCE_RANGE = (1, 5)
+CHAR_ALLOWED_ROLES = {"主角", "配角", "路人", "反派", "未指定", ""}
+CHAR_ALLOWED_STATUSES = {"存活", "失踪", "死亡", "转生", "未指定", ""}
+
+EV_ALLOWED = {
+    "in_story_time", "chapter_time_label", "importance",
+    "attributes", "entity_id", "name",
+}
+EV_IMPORTANCE_RANGE = (1, 5)
+
+LOC_ALLOWED = {
+    "location_type", "attributes", "entity_id", "name",
+}
+LOC_ALLOWED_TYPES = {"城市", "建筑", "秘境", "区域", "异空间", "未指定", ""}
+
+# 关系 (含 relation_type)
+REL_ALLOWED = {
+    "source", "target", "source_entity_id", "target_entity_id",
+    "relation", "role", "action", "properties", "relation_type",
+}
+
+RELATION_TYPES = {"causal", "temporal", "spatial", ""}
+
+
+def _coerce_int(value: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
+def _coerce_enum(value: Any, allowed: set, default: str = "") -> str:
+    if not isinstance(value, str):
+        return default
+    v = value.strip()
+    if v in allowed:
+        return v
+    # 兼容性: 接受英文 enum
+    mapping = {
+        "main": "主角", "supporting": "配角", "minor": "路人", "villain": "反派",
+        "alive": "存活", "missing": "失踪", "dead": "死亡", "reincarnated": "转生",
+        "city": "城市", "building": "建筑", "realm": "秘境", "area": "区域", "exotic": "异空间",
+    }
+    if v in mapping:
+        return mapping[v]
+    return default
+
+
+def validate_extracted_character(c: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """⑥ 校验 + 清洗 1 个 character entity. 返回 (cleaned, warnings)."""
+    warnings: List[str] = []
+    if not isinstance(c, dict):
+        return {}, ["character 不是 dict"]
+    cleaned = {k: v for k, v in c.items() if k in CHAR_ALLOWED}
+    name = (cleaned.get("name") or "").strip()
+    if not name:
+        return {}, ["character 缺 name, 丢弃"]
+    cleaned["name"] = name
+    entity_id = (cleaned.get("entity_id") or "").strip()
+    if not entity_id:
+        cleaned["entity_id"] = f"char_{(hash(name) & 0xFFFF):03d}"
+    # importance 必填 1..5
+    cleaned["importance"] = _coerce_int(
+        cleaned.get("importance"), 2, *CHAR_IMPORTANCE_RANGE
+    )
+    # role / status 清洗
+    if "role" in cleaned:
+        cleaned["role"] = _coerce_enum(cleaned["role"], CHAR_ALLOWED_ROLES)
+    if "status" in cleaned:
+        cleaned["status"] = _coerce_enum(cleaned["status"], CHAR_ALLOWED_STATUSES)
+    # attributes 必须是 dict
+    attrs = cleaned.get("attributes")
+    if attrs is not None and not isinstance(attrs, dict):
+        warnings.append(f"character {name} 的 attributes 不是 dict, 已丢弃")
+        cleaned.pop("attributes", None)
+    return cleaned, warnings
+
+
+def validate_extracted_event(e: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    warnings: List[str] = []
+    if not isinstance(e, dict):
+        return {}, ["event 不是 dict"]
+    cleaned = {k: v for k, v in e.items() if k in EV_ALLOWED}
+    name = (cleaned.get("name") or "").strip()
+    if not name:
+        return {}, ["event 缺 name, 丢弃"]
+    cleaned["name"] = name
+    if not (cleaned.get("entity_id") or "").strip():
+        cleaned["entity_id"] = f"evt_{(hash(name) & 0xFFFF):03d}"
+    cleaned["importance"] = _coerce_int(
+        cleaned.get("importance"), 3, *EV_IMPORTANCE_RANGE
+    )
+    attrs = cleaned.get("attributes")
+    if attrs is not None and not isinstance(attrs, dict):
+        warnings.append(f"event {name} 的 attributes 不是 dict, 已丢弃")
+        cleaned.pop("attributes", None)
+    return cleaned, warnings
+
+
+def validate_extracted_location(l: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    warnings: List[str] = []
+    if not isinstance(l, dict):
+        return {}, ["location 不是 dict"]
+    cleaned = {k: v for k, v in l.items() if k in LOC_ALLOWED}
+    name = (cleaned.get("name") or "").strip()
+    if not name:
+        return {}, ["location 缺 name, 丢弃"]
+    cleaned["name"] = name
+    if not (cleaned.get("entity_id") or "").strip():
+        cleaned["entity_id"] = f"loc_{(hash(name) & 0xFFFF):03d}"
+    if "location_type" in cleaned:
+        cleaned["location_type"] = _coerce_enum(cleaned["location_type"], LOC_ALLOWED_TYPES)
+    attrs = cleaned.get("attributes")
+    if attrs is not None and not isinstance(attrs, dict):
+        warnings.append(f"location {name} 的 attributes 不是 dict, 已丢弃")
+        cleaned.pop("attributes", None)
+    return cleaned, warnings
+
+
+def validate_extracted_relation(r: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    warnings: List[str] = []
+    if not isinstance(r, dict):
+        return {}, ["relation 不是 dict"]
+    cleaned = {k: v for k, v in r.items() if k in REL_ALLOWED}
+    s = (cleaned.get("source") or cleaned.get("source_entity_id") or "").strip()
+    t = (cleaned.get("target") or cleaned.get("target_entity_id") or "").strip()
+    if not s or not t:
+        return {}, ["relation 缺 source 或 target, 丢弃"]
+    cleaned["source_entity_id"] = s
+    cleaned["target_entity_id"] = t
+    if "relation_type" in cleaned:
+        cleaned["relation_type"] = _coerce_enum(cleaned["relation_type"], RELATION_TYPES)
+    return cleaned, warnings
+
+
+# ---------------------------------------------------------------------------
+# ④⑥ EntityExtractor v2 — 含 locations + 结构化字段 + schema 校验
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExtractedKG:
+    characters: List[Dict[str, Any]] = field(default_factory=list)
+    events: List[Dict[str, Any]] = field(default_factory=list)
+    locations: List[Dict[str, Any]] = field(default_factory=list)
+    character_event_relations: List[Dict[str, Any]] = field(default_factory=list)
+    character_relations: List[Dict[str, Any]] = field(default_factory=list)
+    event_relations: List[Dict[str, Any]] = field(default_factory=list)
+    conflicts_in_text: List[Dict[str, Any]] = field(default_factory=list)
+    raw: str = ""
+    warnings: List[str] = field(default_factory=list)
+
+
+class EntityExtractor:
+    """v2 实体抽取: 人物 + 事件 + 地点 + 3 类关系 + 冲突标注.
+
+    - 使用 v2 提示词 (含 locations + 结构化字段 + conflicts_in_text)
+    - 调用前先附上 KG 已知冲突, 让 LLM 在本次抽取中「主动对齐」
+    - 入库前对所有实体跑 schema 校验, 丢弃非法项, 收集 warnings
+    """
+
+    async def run(
+        self,
+        *,
+        model_cfg: Dict[str, Any],
+        chapter_text: str,
+        chapter_no: int = 0,
+        kg_warnings: str = "(无)",
+    ) -> ExtractedKG:
+        vars_payload = {
+            "chapter_text": chapter_text[:8000],
+            "chapter_no": str(chapter_no),
+            "kg_warnings": kg_warnings or "(无)",
+        }
+        try:
+            raw = await _call_llm(
+                model_cfg=model_cfg,
+                prompt_key="creation.extractor.entity_v2",
+                template_vars=vars_payload,
+            )
+        except AgentCallError as exc:
+            logger.warning("extractor v2 LLM failed: %s", exc)
+            return ExtractedKG(raw=str(exc), warnings=[str(exc)])
+        parsed = _extract_json(raw)
+        if not isinstance(parsed, dict):
+            return ExtractedKG(raw=raw, warnings=["extractor 未返回 JSON"])
+        out = ExtractedKG(raw=raw)
+        for c in (parsed.get("characters") or []):
+            cleaned, warns = validate_extracted_character(c)
+            if cleaned:
+                out.characters.append(cleaned)
+            out.warnings.extend(warns)
+        for e in (parsed.get("events") or []):
+            cleaned, warns = validate_extracted_event(e)
+            if cleaned:
+                out.events.append(cleaned)
+            out.warnings.extend(warns)
+        for l in (parsed.get("locations") or []):
+            cleaned, warns = validate_extracted_location(l)
+            if cleaned:
+                out.locations.append(cleaned)
+            out.warnings.extend(warns)
+        for r in (parsed.get("character_event_relations") or []):
+            cleaned, warns = validate_extracted_relation(r)
+            if cleaned:
+                out.character_event_relations.append(cleaned)
+            out.warnings.extend(warns)
+        for r in (parsed.get("character_relations") or []):
+            cleaned, warns = validate_extracted_relation(r)
+            if cleaned:
+                out.character_relations.append(cleaned)
+            out.warnings.extend(warns)
+        for r in (parsed.get("event_relations") or []):
+            cleaned, warns = validate_extracted_relation(r)
+            if cleaned:
+                out.event_relations.append(cleaned)
+            out.warnings.extend(warns)
+        for c in (parsed.get("conflicts_in_text") or []):
+            if isinstance(c, dict):
+                out.conflicts_in_text.append({k: str(v) for k, v in c.items()})
+        return out
+
+
+# ---------------------------------------------------------------------------
+# ⑤ ThreadExtractor — 伏笔/剧情线索抽取
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ThreadAction:
+    thread_id: str
+    action: str  # create | update | resolve | drop
+    title: str = ""
+    thread_type: str = ""
+    status: str = "open"
+    priority: int = 3
+    related_entity_ids: List[str] = field(default_factory=list)
+    notes: str = ""
+
+
+@dataclass
+class ThreadsOutput:
+    threads: List[ThreadAction] = field(default_factory=list)
+    raw: str = ""
+
+
+class ThreadExtractor:
+    """从已确认的章节正文中识别 / 更新 / 回收 / 放弃 剧情线索."""
+
+    async def run(
+        self,
+        *,
+        model_cfg: Dict[str, Any],
+        chapter_content: str,
+        chapter_no: int,
+        open_threads: List[Dict[str, Any]],
+    ) -> ThreadsOutput:
+        # 把 open threads 序列化成简洁的 prompt 输入
+        open_lines = []
+        for t in open_threads[:30]:
+            open_lines.append(
+                f"- {t.get('thread_id', '?')}: {t.get('title', '?')} "
+                f"[{t.get('status', '?')}, p={t.get('priority', '?')}, "
+                f"type={t.get('thread_type', '?')}]"
+            )
+        open_threads_text = "\n".join(open_lines) or "(无已知未结线索)"
+
+        vars_payload = {
+            "chapter_content": chapter_content[:8000],
+            "chapter_no": str(chapter_no),
+            "open_threads": open_threads_text,
+        }
+        try:
+            raw = await _call_llm(
+                model_cfg=model_cfg,
+                prompt_key="creation.extractor.plot_thread",
+                template_vars=vars_payload,
+            )
+        except AgentCallError as exc:
+            logger.warning("thread_extractor LLM failed: %s", exc)
+            return ThreadsOutput(raw=str(exc))
+        parsed = _extract_json(raw)
+        if not isinstance(parsed, dict):
+            return ThreadsOutput(raw=raw)
+        out = ThreadsOutput(raw=raw)
+        for t in (parsed.get("threads") or []):
+            if not isinstance(t, dict):
+                continue
+            ta = ThreadAction(
+                thread_id=str(t.get("thread_id") or f"thread_{(hash(str(t.get('title'))) & 0xFFFF):03d}"),
+                action=str(t.get("action") or "create"),
+                title=str(t.get("title") or ""),
+                thread_type=str(t.get("thread_type") or ""),
+                status=str(t.get("status") or "open"),
+                priority=_coerce_int(t.get("priority"), 3, 1, 5),
+                related_entity_ids=[
+                    str(x) for x in (t.get("related_entity_ids") or [])
+                    if isinstance(x, (str, int))
+                ],
+                notes=str(t.get("notes") or ""),
+            )
+            if ta.action not in {"create", "update", "resolve", "drop"}:
+                ta.action = "create"
+            out.threads.append(ta)
+        return out
+
+
+# ---------------------------------------------------------------------------
+# ⑦ CompassAgent — 偏离度检测
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CompassOutput:
+    scores: Dict[str, float] = field(default_factory=dict)
+    overall: float = 0.0
+    summary: str = ""
+    warnings: List[Dict[str, str]] = field(default_factory=list)
+    raw: str = ""
+
+
+class CompassAgent:
+    """在 confirm_chapter 前调用: 5 维评估是否偏离."""
+
+    DEFAULT_SCORES = {
+        "theme_deviation": 8.0,
+        "outline_deviation": 8.0,
+        "character_consistency": 8.0,
+        "foreshadowing_progress": 8.0,
+        "style_consistency": 8.0,
+    }
+
+    async def run(
+        self,
+        *,
+        model_cfg: Dict[str, Any],
+        project: Dict[str, Any],
+        chapter: Dict[str, Any],
+        chapter_content: str,
+        open_threads: List[Dict[str, Any]],
+        kg_warnings: str = "(无)",
+    ) -> CompassOutput:
+        # 根设定
+        settings_lines = [
+            f"标题: {project.get('title', '')}",
+            f"类型: {project.get('genre', '')}",
+            f"世界观: {project.get('worldview', '')}",
+            f"文风偏好: {json.dumps(project.get('style_pref') or {}, ensure_ascii=False)}",
+        ]
+        root_settings = "\n".join(settings_lines)
+        # 已知未结线索
+        threads_lines = []
+        for t in open_threads[:20]:
+            threads_lines.append(
+                f"- [{t.get('thread_id', '?')}] {t.get('title', '?')} "
+                f"({t.get('thread_type', '?')}, {t.get('status', '?')}, p={t.get('priority', '?')})"
+            )
+        open_threads_text = "\n".join(threads_lines) or "(无)"
+
+        vars_payload = {
+            "root_settings": root_settings,
+            "outline": project.get("outline", ""),
+            "chapter_title": chapter.get("title", ""),
+            "chapter_content": chapter_content[:6000],
+            "chapter_no": str(chapter.get("chapter_no", "")),
+            "open_threads": open_threads_text,
+            "kg_warnings": kg_warnings or "(无)",
+        }
+        try:
+            raw = await _call_llm(
+                model_cfg=model_cfg,
+                prompt_key="creation.compass.deviation",
+                template_vars=vars_payload,
+            )
+        except AgentCallError as exc:
+            logger.warning("compass LLM failed: %s", exc)
+            return CompassOutput(
+                scores=dict(self.DEFAULT_SCORES),
+                overall=sum(self.DEFAULT_SCORES.values()) / 5,
+                summary=f"Compass 调用失败: {exc}",
+                raw=str(exc),
+            )
+        return self._parse_compass(raw)
+
+    @classmethod
+    def _parse_compass(cls, raw: str) -> CompassOutput:
+        parsed = _extract_json(raw)
+        if not isinstance(parsed, dict):
+            return CompassOutput(
+                scores=dict(cls.DEFAULT_SCORES),
+                overall=sum(cls.DEFAULT_SCORES.values()) / 5,
+                summary="Compass 未返回 JSON, 已采用兜底评分",
+                raw=raw,
+            )
+        scores_in = parsed.get("scores") or {}
+        scores: Dict[str, float] = {}
+        for k, default in cls.DEFAULT_SCORES.items():
+            try:
+                v = float(scores_in.get(k, default))
+            except (TypeError, ValueError):
+                v = default
+            scores[k] = max(0.0, min(10.0, v))
+        try:
+            overall = float(parsed.get("overall", 0))
+        except (TypeError, ValueError):
+            overall = 0.0
+        if overall <= 0:
+            overall = sum(scores.values()) / max(1, len(scores))
+        overall = max(0.0, min(10.0, overall))
+        warnings = []
+        for w in (parsed.get("warnings") or []):
+            if isinstance(w, dict):
+                warnings.append({k: str(v) for k, v in w.items()})
+        return CompassOutput(
+            scores=scores,
+            overall=overall,
+            summary=str(parsed.get("summary") or ""),
+            warnings=warnings,
+            raw=raw,
+        )
+
+
+# ---------------------------------------------------------------------------
+# ⑧ BridgeAgent — 跨章接缝检测
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BridgeOutput:
+    bridge_score: float = 8.0
+    conflicts: List[str] = field(default_factory=list)
+    open_hook_suggestions: List[str] = field(default_factory=list)
+    raw: str = ""
+
+
+class BridgeAgent:
+    """生成第 N+1 章时调用: 检测上一章末尾 → 本章方向 的衔接质量 + 推荐开头钩子."""
+
+    async def run(
+        self,
+        *,
+        model_cfg: Dict[str, Any],
+        prev_tail: str,
+        direction: PlannerDirection,
+        kg_warnings: str = "(无)",
+    ) -> BridgeOutput:
+        vars_payload = {
+            "prev_tail": prev_tail[:1500],
+            "direction_title": direction.title,
+            "direction_synopsis": direction.synopsis,
+            "direction_entities": ", ".join(direction.key_entities) or "(无)",
+            "direction_foreshadowing": "; ".join(direction.foreshadowing) or "(无)",
+            "direction_key_event": direction.key_event,
+            "kg_warnings": kg_warnings or "(无)",
+        }
+        try:
+            raw = await _call_llm(
+                model_cfg=model_cfg,
+                prompt_key="creation.bridge.transition",
+                template_vars=vars_payload,
+            )
+        except AgentCallError as exc:
+            logger.warning("bridge LLM failed: %s", exc)
+            return BridgeOutput(raw=str(exc))
+        parsed = _extract_json(raw)
+        if not isinstance(parsed, dict):
+            return BridgeOutput(raw=raw)
+        try:
+            score = float(parsed.get("bridge_score", 8.0))
+        except (TypeError, ValueError):
+            score = 8.0
+        return BridgeOutput(
+            bridge_score=max(0.0, min(10.0, score)),
+            conflicts=[str(x) for x in (parsed.get("conflicts") or [])],
+            open_hook_suggestions=[
+                str(x) for x in (parsed.get("open_hook_suggestions") or [])
+            ],
+            raw=raw,
+        )
+
+
+# ---------------------------------------------------------------------------
+# ⑤ Threads 序列化 — 给 Planner/Writer 列出未结线索
+# ---------------------------------------------------------------------------
+
+THREAD_STATUSES = {"open", "hinting", "resolving", "resolved", "dropped"}
+
+
+def serialize_threads_for_prompt(
+    threads: List[Dict[str, Any]],
+    *,
+    only_active: bool = True,
+) -> str:
+    """把当前 KG 中的 plot_threads 序列化为 prompt 文本.
+
+    only_active=True 时只列 open/hinting (Writer 视角, 提示推进).
+    """
+    if not threads:
+        return ""
+    parts: List[str] = []
+    open_count = 0
+    resolved_count = 0
+    for t in threads:
+        status = t.get("status") or "open"
+        if status in ("resolved", "dropped"):
+            resolved_count += 1
+            if only_active:
+                continue
+        else:
+            open_count += 1
+        thread_id = t.get("thread_id") or "?"
+        title = t.get("title") or "(无标题)"
+        ttype = t.get("thread_type") or ""
+        priority = t.get("priority") or 3
+        notes = (t.get("notes") or "").strip()
+        line = f"- [{thread_id}] **{title}**"
+        meta = []
+        if ttype:
+            meta.append(ttype)
+        meta.append(f"p={priority}")
+        meta.append(f"状态={status}")
+        line += f" 〔{'; '.join(meta)}〕"
+        if notes:
+            line += f"\n  备注: {notes[:80]}{'…' if len(notes) > 80 else ''}"
+        parts.append(line)
+    summary = (
+        f"当前未结线索 {open_count} 条, 已回收 {resolved_count} 条. "
+        f"主线 (p≥4) 必须在本章推进/回收至少 1 条."
+    )
+    return summary + ("\n" + "\n".join(parts) if parts else "")
+
+
+# ---------------------------------------------------------------------------
+# ⑨ Themes 序列化 — 主题进度
+# ---------------------------------------------------------------------------
+
+
+def serialize_themes_for_prompt(
+    themes_progress: Optional[List[Dict[str, Any]]],
+    *,
+    current_themes: Optional[List[str]] = None,
+) -> str:
+    """把项目级 themes_progress 序列化为 Writer 提示词中的「主题进度」片段."""
+    if not themes_progress and not current_themes:
+        return ""
+    parts: List[str] = []
+    if themes_progress:
+        for t in themes_progress:
+            name = t.get("theme") or "?"
+            progress = t.get("progress", 0)
+            stage = t.get("stage", "铺垫")
+            bar_len = 10
+            filled = round(min(1.0, max(0.0, progress)) * bar_len)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            parts.append(f"- {name}  {bar}  {int(progress*100)}% 〔{stage}〕")
+    if current_themes:
+        parts.append("本章要触碰的主题: " + " / ".join(current_themes))
+    return "\n".join(parts)
+
+

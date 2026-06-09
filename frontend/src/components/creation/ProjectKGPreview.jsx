@@ -93,7 +93,7 @@ export function ProjectKGPreview({ projectId, refreshKey = 0 }) {
           <ul className="creation-kg-rels">
             {ce.slice(0, 10).map((r) => (
               <li key={r.id}>
-                <code>{r.source_entity_id}</code> --[{r.relation} / {r.role || '-'} / {r.action || '-'}]--> <code>{r.target_entity_id}</code>
+                <code>{r.source_entity_id}</code> --[{r.relation} / {r.role || '-'} / {r.action || '-'}]{`-->`} <code>{r.target_entity_id}</code>
               </li>
             ))}
           </ul>
@@ -105,7 +105,7 @@ export function ProjectKGPreview({ projectId, refreshKey = 0 }) {
           <ul className="creation-kg-rels">
             {cc.slice(0, 10).map((r) => (
               <li key={r.id}>
-                <code>{r.source_entity_id}</code> --[{r.relation}]--> <code>{r.target_entity_id}</code>
+                <code>{r.source_entity_id}</code> --[{r.relation}]{`-->`} <code>{r.target_entity_id}</code>
               </li>
             ))}
           </ul>

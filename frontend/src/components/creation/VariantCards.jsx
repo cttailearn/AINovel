@@ -1,15 +1,26 @@
-// 三选一卡片: 展示 Planner 方向 + Writer 候选 + Critic 评分
-import { useState } from 'react';
+// 三选一: Tab 形式的版本切换
+// 点击 tab 切换预览 (不切换选中), 点 "选此版本" 才真正选中
+import { useEffect, useState } from 'react';
 
-function ScoreRing({ value }) {
+function ScoreRing({ value, compact = false }) {
   if (typeof value !== 'number' || Number.isNaN(value)) {
-    return <span className="creation-score-ring muted">—</span>;
+    return (
+      <span
+        className={`creation-score-ring ${compact ? 'compact' : ''} muted`}
+        title="Critic 综合评分"
+      >
+        —
+      </span>
+    );
   }
   let tone = 'low';
   if (value >= 8) tone = 'high';
   else if (value >= 6) tone = 'mid';
   return (
-    <span className={`creation-score-ring tone-${tone}`} title="Critic 综合评分">
+    <span
+      className={`creation-score-ring ${compact ? 'compact' : ''} tone-${tone}`}
+      title="Critic 综合评分"
+    >
       {value.toFixed(1)}
     </span>
   );
@@ -20,14 +31,16 @@ function CriticReport({ report }) {
   const scores = report.scores || {};
   return (
     <div className="creation-critic-report">
-      <div className="creation-critic-scores">
-        {Object.entries(scores).map(([k, v]) => (
-          <div className="creation-critic-score" key={k}>
-            <span className="muted small">{k}</span>
-            <span>{typeof v === 'number' ? v.toFixed(1) : '—'}</span>
-          </div>
-        ))}
-      </div>
+      {Object.keys(scores).length > 0 && (
+        <div className="creation-critic-scores">
+          {Object.entries(scores).map(([k, v]) => (
+            <div className="creation-critic-score" key={k}>
+              <span className="muted small">{k}</span>
+              <span>{typeof v === 'number' ? v.toFixed(1) : '—'}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {Array.isArray(report.strengths) && report.strengths.length > 0 && (
         <div className="creation-critic-list">
           <h5>亮点</h5>
@@ -50,7 +63,7 @@ function CriticReport({ report }) {
   );
 }
 
-export function VariantCards({
+export function VariantTabs({
   variants,
   selectedId,
   onSelect,
@@ -58,84 +71,128 @@ export function VariantCards({
   onConfirm,
   disabled = false,
 }) {
-  const [expanded, setExpanded] = useState({});
+  const [activeIdx, setActiveIdx] = useState(0);
+
+  // 默认打开用户已选中的版本 (章节详情刚加载时)
+  useEffect(() => {
+    if (!variants || variants.length === 0) return;
+    if (selectedId) {
+      const idx = variants.findIndex((v) => v.id === selectedId);
+      if (idx >= 0) setActiveIdx(idx);
+    }
+  }, [selectedId, variants]);
 
   if (!variants || variants.length === 0) {
     return <p className="muted small">暂无候选章节</p>;
   }
+
+  const safeIdx = Math.min(activeIdx, variants.length - 1);
+  const active = variants[safeIdx];
+  const isSelected = selectedId === active.id;
+  const report = active.critic_report || {};
+  const focusLine = (active.planner_direction || '').split('\n')[0] || '';
+  const charCount = (active.content || '').length;
+
   return (
-    <div className="creation-variant-grid">
-      {variants.map((v) => {
-        const isSel = selectedId === v.id;
-        const isExpanded = expanded[v.id] ?? false;
-        const report = v.critic_report || {};
-        const score = v.score ?? report.overall ?? null;
-        const content = v.content || '';
-        const preview = content.slice(0, 200) + (content.length > 200 ? '…' : '');
-        return (
-          <div
-            key={v.id}
-            className={`creation-variant-card ${isSel ? 'selected' : ''}`}
-          >
-            <div className="creation-variant-card-head">
-              <div className="creation-variant-card-title">
-                <span className="creation-variant-badge">候选 {v.variant_index + 1}</span>
-                <span className="muted small">
-                  {v.focus_summary || (v.planner_direction || '').split('\n')[0].slice(0, 60)}
-                </span>
-              </div>
-              <ScoreRing value={score} />
-            </div>
-            <pre className="creation-variant-preview">
-              {isExpanded ? content : preview}
-            </pre>
-            <div className="creation-variant-card-meta muted small">
-              {(content || '').length} 字
-              {v.planner_direction ? ` · ${(v.planner_direction || '').split('\n')[0]}` : ''}
-            </div>
-            {isExpanded && <CriticReport report={report} />}
-            <div className="creation-variant-card-actions">
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={() => setExpanded((s) => ({ ...s, [v.id]: !isExpanded }))}
-                disabled={disabled}
-              >
-                {isExpanded ? '收起' : '展开 / 查看审核'}
-              </button>
-              {isSel ? (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => onEdit(v)}
-                    disabled={disabled}
-                  >
-                    编辑
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-sm"
-                    onClick={() => onConfirm(v)}
-                    disabled={disabled}
-                  >
-                    确认本章 →
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => onSelect(v.id)}
-                  disabled={disabled}
+    <div className="creation-variant-tabs">
+      {/* 顶部 Tab 栏 */}
+      <div className="creation-variant-tabs-bar" role="tablist">
+        {variants.map((v, i) => {
+          const isActive = i === safeIdx;
+          const isSel = selectedId === v.id;
+          const s = v.score ?? v.critic_report?.overall ?? null;
+          const focusShort =
+            v.focus_summary ||
+            (v.planner_direction || '').split('\n')[0]?.slice(0, 14) ||
+            '—';
+          return (
+            <button
+              key={v.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              className={
+                'creation-variant-tab'
+                + (isActive ? ' active' : '')
+                + (isSel ? ' selected' : '')
+              }
+              onClick={() => setActiveIdx(i)}
+              title={`候选 ${i + 1} · ${v.focus_summary || focusLine || '—'}`}
+            >
+              <span className="creation-variant-tab-num">候选 {i + 1}</span>
+              <span className="creation-variant-tab-focus">{focusShort}</span>
+              <ScoreRing value={s} compact />
+              {isSel && (
+                <span
+                  className="creation-variant-tab-check"
+                  aria-label="当前已选"
                 >
-                  选此版本
-                </button>
+                  ✓
+                </span>
               )}
-            </div>
-          </div>
-        );
-      })}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tab 内容区 */}
+      <div className="creation-variant-tab-panel" role="tabpanel">
+        <div className="creation-variant-tab-panel-head">
+          <h4>{active.focus_summary || focusLine || '—'}</h4>
+          <span className="muted small">
+            候选 {active.variant_index + 1} · {charCount} 字
+          </span>
+        </div>
+        <pre className="creation-variant-tab-content">
+          {active.content || '(空)'}
+        </pre>
+        {report && Object.keys(report).length > 0 && (
+          <CriticReport report={report} />
+        )}
+      </div>
+
+      {/* 操作区 */}
+      <div className="creation-variant-tabs-actions">
+        {isSelected ? (
+          <>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => onEdit(active)}
+              disabled={disabled}
+              title="进入编辑器微调"
+            >
+              ✎ 编辑
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => onConfirm(active)}
+              disabled={disabled}
+              title="确认本章, 内容入图谱"
+            >
+              确认本章 →
+            </button>
+          </>
+        ) : (
+          <>
+            <span className="creation-variant-tabs-hint muted small">
+              点击下方按钮将此版本设为「已选」
+            </span>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => onSelect(active.id)}
+              disabled={disabled}
+            >
+              选此版本 (候选 {active.variant_index + 1})
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
+
+// 保留旧名导出以便兼容
+export { VariantTabs as VariantCards };
