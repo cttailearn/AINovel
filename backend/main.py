@@ -26,6 +26,7 @@ from routers import (
     models_router,
     novels_router,
     prompts_router,
+    tasks_router,
 )
 
 logging.basicConfig(
@@ -84,6 +85,7 @@ app.include_router(prompts_router)
 app.include_router(image_router)
 app.include_router(enrichment_router)
 app.include_router(creation_router)
+app.include_router(tasks_router)
 
 
 @app.get("/api")

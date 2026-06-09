@@ -4,6 +4,21 @@ All endpoints live under ``/api/enrichment``. The batch endpoint
 (``POST /novels/{id}/batch``) is a Server-Sent Events stream; the
 client can call ``GET /novels/{id}/progress`` to poll a snapshot of
 per-chapter status (used by the right-side stats panel).
+
+任务持久化
+----------
+v0.3.x 起, 跑批任务在 ``TaskRegistry`` 中以 *应用作用域* 的形式登记, 与
+SSE 连接解耦:
+
+* 启动:  在 registry 中注册一个 task, 把 registry 的 ``cancel_flag`` 传
+  给业务 ``should_cancel``;
+* 进度:  业务 ``on_event`` 直接 ``registry.publish``, 所有 SSE 订阅者都收
+  得到; 也支持多个浏览器 tab 同时订阅同一任务;
+* 断连:  客户端断开只关掉订阅协程, *不* 取消任务;
+* 跨连接取消:  任意新连接 ``POST /api/tasks/{task_id}/cancel``;
+* 跨连接重订阅:  任意新连接 ``GET /api/tasks/{task_id}/events``.
+
+也就是说, 用户刷新/关 tab 之后再回来, 任务还在跑, 进度能续上.
 """
 from __future__ import annotations
 
@@ -17,7 +32,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 
 from config import ENRICHMENT_DEFAULT_CONCURRENCY
-from database import list_failed_chapter_ids
+from database import get_novel_by_id, list_failed_chapter_ids
 from schemas import (
     ENRICHMENT_STEPS,
     ApplyRequest,
@@ -36,6 +51,7 @@ from schemas import (
 )
 from services import enrichment_service
 from services import enrichment_suggestion_service
+from services.task_registry import KIND_ENRICHMENT, registry
 
 logger = logging.getLogger(__name__)
 
@@ -266,18 +282,46 @@ async def run_batch(novel_id: int, payload: EnrichmentBatchRequest):
         - ``step_done``     某个步骤整体完成
         - ``complete``      整批完成
         - ``error``         异常 (整批级)
+        - ``task_id``       首个 ``start`` 事件里携带, 前端持久化用来重连
+
+    任务以应用作用域的 ``TaskRecord`` 形式跑在 ``TaskRegistry`` 中. SSE
+    客户端断开不再取消任务; 想要取消, 调用
+    ``POST /api/tasks/{task_id}/cancel``.
     """
     steps = [s for s in (payload.steps or []) if s in ENRICHMENT_STEPS]
     if not steps:
         raise HTTPException(status_code=400, detail="steps 至少需要包含 1 个有效步骤")
 
-    progress_queue: asyncio.Queue = asyncio.Queue()
-    cancel_flag = {"cancelled": False}
+    novel = await get_novel_by_id(novel_id)
+    if not novel:
+        raise HTTPException(status_code=404, detail="小说不存在")
 
-    def _should_cancel() -> bool:
-        return cancel_flag["cancelled"]
+    # 同 (kind, subject_id) 同时只允许 1 个, 否则在 registry 层 raise.
+    try:
+        record = await registry.register(
+            kind=KIND_ENRICHMENT,
+            subject_id=novel_id,
+            title=str(novel.get("title") or f"小说 {novel_id}"),
+            meta={
+                "model_config_id": payload.model_config_id,
+                "steps": list(steps),
+                "chapter_ids": list(payload.chapter_ids or []),
+                "skip_existing": bool(payload.skip_existing),
+                "concurrency": payload.concurrency or ENRICHMENT_DEFAULT_CONCURRENCY,
+            },
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    async def _emit(payload_obj: Dict[str, Any]) -> None:
+        # 业务事件直接 publish 到 registry, 所有 SSE 订阅者都收得到.
+        try:
+            await record.publish(payload_obj)
+        except Exception:  # noqa: BLE001
+            logger.warning("publish event failed", exc_info=True)
 
     async def _runner() -> None:
+        final_state = "complete"
         try:
             await enrichment_service.run_batch(
                 novel_id,
@@ -288,38 +332,47 @@ async def run_batch(novel_id: int, payload: EnrichmentBatchRequest):
                 skip_existing=payload.skip_existing,
                 general_rule=payload.general_rule,
                 scene_rule=payload.scene_rule,
-                on_event=lambda p: _put(p),
-                should_cancel=_should_cancel,
+                on_event=_emit,
+                should_cancel=record.should_cancel,
             )
+            if record.should_cancel():
+                final_state = "cancelled"
         except Exception as exc:  # noqa: BLE001
             logger.exception("Enrichment batch failed: %s", exc)
-            await progress_queue.put({"event": "error", "message": str(exc)[:500]})
+            await record.publish(
+                {"event": "error", "message": str(exc)[:500]}
+            )
+            final_state = "error"
         finally:
-            await progress_queue.put({"event": "__end__"})
+            # 业务侧未必显式发 cancelled, 这里补一条, 便于前端明确知道结局.
+            if final_state == "complete" and record.should_cancel():
+                final_state = "cancelled"
+            if final_state == "cancelled":
+                await record.publish(
+                    {
+                        "event": "cancelled",
+                        "novel_id": novel_id,
+                        "step_progress": {},
+                    }
+                )
+            await registry.finish(record.task_id, final_state)
 
-    async def _put(payload_obj: Dict[str, Any]) -> None:
-        await progress_queue.put(payload_obj)
+    # 启动后台任务 — 注意: 这个 task 的生命周期属于应用作用域,
+    # 不再绑定到任何 SSE 连接. 客户端断开只会关掉订阅, 不会取消 _runner.
+    asyncio.create_task(_runner())
 
-    async def event_stream() -> AsyncIterator[bytes]:
-        task = asyncio.create_task(_runner())
-        try:
-            while True:
-                payload_obj = await progress_queue.get()
-                if payload_obj.get("event") == "__end__":
-                    break
-                yield _sse_format(payload_obj.get("event", "message"), payload_obj)
-            if not task.done():
-                try:
-                    await asyncio.wait_for(task, timeout=1.0)
-                except asyncio.TimeoutError:
-                    task.cancel()
-        finally:
-            cancel_flag["cancelled"] = True
-            if not task.done():
-                task.cancel()
+    # 立刻在 start 事件里补一个 task_id, 让前端能持久化用于重连.
+    await record.publish(
+        {
+            "event": "registered",
+            "task_id": record.task_id,
+            "novel_id": novel_id,
+        }
+    )
 
+    # 返回一个新的 SSE 流: 订阅 registry 中该任务的广播.
     return StreamingResponse(
-        event_stream(),
+        _enrichment_subscribe_stream(record.task_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -327,6 +380,26 @@ async def run_batch(novel_id: int, payload: EnrichmentBatchRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+async def _enrichment_subscribe_stream(task_id: str) -> AsyncIterator[bytes]:
+    """将 registry 的事件广播转成 SSE 字节流.
+
+    注意: 客户端断开时, 这个生成器会被取消, 但 registry 中的任务 *不* 受
+    影响. 这正是"刷新页面 / 切换 tab 后任务不丢"的关键.
+    """
+    rec = registry.get(task_id)
+    if not rec:
+        yield _sse_format("error", {"message": "任务不存在或已清理"})
+        return
+    try:
+        async for ev in rec.subscribe():
+            event_name = ev.get("event") or "message"
+            yield _sse_format(event_name, ev)
+    except asyncio.CancelledError:
+        # 客户端断开 — 记录日志, 重新抛出让 StreamingResponse 清理资源
+        logger.info("enrichment subscribe: client disconnected from %s", task_id)
+        raise
 
 
 @router.post(

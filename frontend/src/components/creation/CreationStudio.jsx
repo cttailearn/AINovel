@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiError, api } from '../../api/client.js';
 import { useToast } from '../Toast/ToastProvider.jsx';
+import { useCreationTask } from '../../state/CreationTaskContext.jsx';
 import { ProjectForm } from './ProjectForm.jsx';
 import { ProjectIntakeWizard } from './ProjectIntakeWizard.jsx';
 import { ChapterGenerator } from './ChapterGenerator.jsx';
@@ -13,6 +14,28 @@ import { VariantEditor } from './VariantEditor.jsx';
 import { ProjectKGPreview } from './ProjectKGPreview.jsx';
 import { KGGraphView } from './KGGraphView.jsx';
 import './creation.css';
+
+// 持久化最近一次打开的项目 ID, 让"刷新页面/重连任务"后能自动回到原项目,
+// 配合 CreationTaskContext 形成完整的"任务不丢"体验.
+const ACTIVE_PROJECT_KEY = 'ainovel.creation.activeProject.v1';
+function readActiveProject() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(ACTIVE_PROJECT_KEY);
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+function writeActiveProject(id) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (id == null) window.localStorage.removeItem(ACTIVE_PROJECT_KEY);
+    else window.localStorage.setItem(ACTIVE_PROJECT_KEY, String(id));
+  } catch { /* noop */ }
+}
 
 // ============================================================
 // 流程进度常量
@@ -73,9 +96,16 @@ function formatDateTime(iso) {
 // ============================================================
 export function CreationStudio({ models = [], topSearch = '' }) {
   const toast = useToast();
+  const creationTask = useCreationTask();
   const [projects, setProjects] = useState([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
-  const [activeProjectId, setActiveProjectId] = useState(null);
+  // 从 localStorage 恢复最近一次打开的项目 — 配合 CreationTaskContext, 刷
+  // 新页面后能直接续上项目 + 后台任务进度.
+  const [activeProjectId, setActiveProjectIdState] = useState(() => readActiveProject());
+  const setActiveProjectId = useCallback((id) => {
+    writeActiveProject(id);
+    setActiveProjectIdState(id);
+  }, []);
   const [projectDetail, setProjectDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
@@ -86,8 +116,17 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   const [chapterDetail, setChapterDetail] = useState(null);
   const [chapterLoading, setChapterLoading] = useState(false);
 
-  const [generating, setGenerating] = useState(false);
-  const [genProgress, setGenProgress] = useState(null);
+  // 章节生成任务委托给 CreationTaskContext, 以便刷新/切页后状态可恢复.
+  // 这里只根据 context 状态派生本组件 UI 所需的 ``generating`` / ``genProgress``.
+  // 当 context 中任务对应的 project 与当前 activeProjectId 一致时才显示进度,
+  // 避免别的项目里残留任务把本项目的画布覆盖掉.
+  const generating = !!(
+    creationTask.running &&
+    activeProjectId != null &&
+    creationTask.projectId === activeProjectId
+  );
+  const genProgress =
+    creationTask.projectId === activeProjectId ? creationTask.genProgress : null;
 
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -243,86 +282,69 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   };
 
   // ---- 章节生成 (SSE) ----
-  const handleGenerate = async ({ user_intent, title, chapter_no }) => {
-    if (!activeProjectId) return;
-    setGenerating(true);
-    setGenProgress({ stage: 'start', variants: {}, autoTitle: null });
-    try {
-      await api.creation.generate(
-        activeProjectId,
-        { user_intent, title, chapter_no },
-        {
-          onEvent: (ev) => {
-            const data = ev.data || {};
-            setGenProgress((prev) => {
-              const next = { ...(prev || { stage: 'start', variants: {}, autoTitle: null }) };
-              if (data.event === 'start') {
-                next.stage = 'start';
-                next.chapter_id = data.chapter_id;
-                next.variants = {};
-                if (data.title) {
-                  next.userTitle = data.title;
-                }
-              } else if (data.event === 'planner_done') {
-                next.stage = 'planner_done';
-                next.directions = data.directions || [];
-                next.variant_ids = data.variant_ids || [];
-              } else if (data.event === 'title_generated') {
-                // 用户没填标题时, AI 自动生成, 这里更新主区显示的标题
-                next.autoTitle = data.title;
-                if (data.auto && data.chapter_id) {
-                  // 同步更新当前章节 title
-                  setChapterDetail((cd) =>
-                    cd && cd.id === data.chapter_id ? { ...cd, title: data.title } : cd
-                  );
-                }
-              } else if (data.event?.startsWith('writer_')) {
-                const idx = Number(data.event.split('_')[1]);
-                next.variants = {
-                  ...(next.variants || {}),
-                  [idx]: { state: 'critiquing', preview: data.preview, word_count: data.word_count },
-                };
-                next.stage = data.event;
-              } else if (data.event?.startsWith('critic_')) {
-                const idx = Number(data.event.split('_')[1]);
-                next.variants = {
-                  ...(next.variants || {}),
-                  [idx]: {
-                    ...(next.variants?.[idx] || {}),
-                    state: 'done',
-                    score: data.score,
-                    variant_id: data.variant_id,
-                  },
-                };
-                next.stage = data.event;
-              } else if (data.event === 'done') {
-                next.stage = 'done';
-                next.chapter_id = data.chapter_id;
-                if (data.title) {
-                  next.autoTitle = data.title;
-                  setChapterDetail((cd) =>
-                    cd && cd.id === data.chapter_id ? { ...cd, title: data.title } : cd
-                  );
-                }
-              } else if (data.event === 'error') {
-                next.stage = 'error';
-                next.error = data.message || '生成失败';
-              }
-              return next;
-            });
-          },
-        }
-      );
-      toast.success('章节生成完成');
-      await loadProjectDetail(activeProjectId);
-      setGenProgress(null);
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : '生成失败');
-      setGenProgress((p) => ({ ...(p || {}), stage: 'error', error: e.message }));
-    } finally {
-      setGenerating(false);
-    }
-  };
+  // 把 SSE 业务事件/状态/取消全权委托给 CreationTaskContext, 本函数只负责
+  // 把 UI 侧的事件 (e.g. 自动同步章节 title) 转译给 context. 任务的"持久化 /
+  // 跨连接取消 / 刷新后重连"由 context 层统一处理.
+  const handleGenerate = useCallback(
+    ({ user_intent, title, chapter_no }) => {
+      if (!activeProjectId) return;
+      creationTask.startGeneration({
+        targetProjectId: activeProjectId,
+        projectTitle: projectDetail?.project?.title,
+        userIntent: user_intent,
+        chapterNo: chapter_no,
+        title,
+        // 默认走 "single" 模式: 一次只产 1 个候选, Critic 评分不达标自动
+        // 回到 Planner + Writer 改写, 最多重试 2 轮 (含首次共 3 次尝试),
+        // 综合分 >= 7.0 视为通过. 旧 3 候选体验可通过 mode='candidates' 启用.
+        mode: 'single',
+        maxRevise: 2,
+        scoreThreshold: 7.0,
+        onProgress: (ev) => {
+          // 同步 autoTitle 到当前 chapter detail, 让左侧大纲的标题立刻更新
+          const data = ev.data || {};
+          if (data.event === 'title_generated' && data.chapter_id) {
+            setChapterDetail((cd) =>
+              cd && cd.id === data.chapter_id ? { ...cd, title: data.title } : cd
+            );
+          }
+          if (data.event === 'done' && data.chapter_id && data.title) {
+            setChapterDetail((cd) =>
+              cd && cd.id === data.chapter_id ? { ...cd, title: data.title } : cd
+            );
+          }
+        },
+        onComplete: async (ev) => {
+          // 兼容 ``ev`` 自身携带 event / 或者 ev.data.event 这两种历史结构
+          const data = ev?.data || ev || {};
+          if (ev?.event === 'done' || data.event === 'done') {
+            // single 模式: done 事件携带 final_score / accepted, 用作提示
+            const score = typeof data.final_score === 'number' ? data.final_score : null;
+            const accepted = data.accepted !== false;
+            const attempts = data.attempts;
+            if (accepted && score != null) {
+              toast.success(`章节生成完成 (评分 ${score.toFixed(1)}, ${attempts} 轮)`);
+            } else if (score != null) {
+              toast.warning(`章节已生成但 Critic 未通过 (${score.toFixed(1)} < ${data.event === 'done' ? '' : ''}阈值)`);
+            } else {
+              toast.success('章节生成完成');
+            }
+            await loadProjectDetail(activeProjectId);
+            // 让大纲里看到"刚生成的章节"被自动选中, 变体视图立刻出现
+            const newChapterId = data.chapter_id;
+            if (newChapterId) {
+              setActiveChapterId(newChapterId);
+              await loadChapterDetail(newChapterId);
+            }
+          } else if (ev?.event === 'error' || data.event === 'error') {
+            const msg = data.message || '生成失败';
+            toast.error(msg);
+          }
+        },
+      });
+    },
+    [activeProjectId, creationTask, loadChapterDetail, loadProjectDetail, projectDetail, toast]
+  );
 
   // ---- 章节操作 ----
   const handleSelectVariant = async (variantId) => {
@@ -1100,74 +1122,9 @@ function ReferencePane({
         </button>
       </div>
       <div className="creation-reference-pane-body">
-        <section className="creation-reference-section">
-          <h4>
-            <span>项目设定</span>
-            <span className="badge">世界观 / 总纲 / 人物 / 文风</span>
-          </h4>
-          {editingProject ? (
-            <ProjectForm
-              initial={project}
-              models={[]}
-              isEdit
-              submitting={submittingProject}
-              onSubmit={handleUpdateProject}
-              onCancel={() => setEditingProject(false)}
-            />
-          ) : (
-            <div className="creation-project-readonly">
-              <div className="muted small">
-                {project.genre || '—'} · 模型 {project.model_id || '默认'} · 第 {project.current_chapter_no || 1} 章
-              </div>
-              {project.worldview && (
-                <div className="creation-project-field">
-                  <h5>世界观</h5>
-                  <p>{project.worldview}</p>
-                </div>
-              )}
-              {project.outline && (
-                <div className="creation-project-field">
-                  <h5>总纲</h5>
-                  <p>{project.outline}</p>
-                </div>
-              )}
-              {hasConcepts && (
-                <div className="creation-project-field">
-                  <h5>初始人物 ({project.initial_concepts.length})</h5>
-                  <ul>
-                    {project.initial_concepts.map((c, i) => (
-                      <li key={i}>
-                        <strong>{c.name}</strong>
-                        {c.attributes && Object.keys(c.attributes).length > 0 && (
-                          <span className="muted small"> · {JSON.stringify(c.attributes)}</span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {project.style_pref && Object.keys(project.style_pref).length > 0 && (
-                <div className="creation-project-field">
-                  <h5>文风偏好</h5>
-                  <ul>
-                    {Object.entries(project.style_pref).map(([k, v]) => (
-                      <li key={k}><strong>{k}</strong>: {String(v) || '—'}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              <div className="creation-project-card-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  onClick={() => setEditingProject(true)}
-                >
-                  ✎ 编辑设定
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
+        {/* 排版说明: 知识图谱相关放在最前, 让用户一进项目就看到 AI 已学到的
+            实体 / 事件 / 关系. 项目设定挪到末尾并默认折叠, 避免长文本把
+            真正关心的 KG 挤到滚动条看不见的位置. */}
 
         {/* ⑨ 主题进度 */}
         {themesProgress.length > 0 && (
@@ -1321,6 +1278,78 @@ function ReferencePane({
           </h4>
           <ProjectKGPreview projectId={project.id} refreshKey={kgRefreshKey} />
         </section>
+
+        {/* 项目设定 — 默认折叠, 放在最末, 不挤 KG */}
+        <section className="creation-reference-section creation-reference-section-collapsible">
+          <details>
+            <summary>
+              <span className="creation-reference-section-summary-title">项目设定</span>
+              <span className="badge">世界观 / 总纲 / 人物 / 文风</span>
+            </summary>
+            {editingProject ? (
+              <ProjectForm
+                initial={project}
+                models={[]}
+                isEdit
+                submitting={submittingProject}
+                onSubmit={handleUpdateProject}
+                onCancel={() => setEditingProject(false)}
+              />
+            ) : (
+              <div className="creation-project-readonly">
+                <div className="muted small">
+                  {project.genre || '—'} · 模型 {project.model_id || '默认'} · 第 {project.current_chapter_no || 1} 章
+                </div>
+                {project.worldview && (
+                  <div className="creation-project-field">
+                    <h5>世界观</h5>
+                    <p>{project.worldview}</p>
+                  </div>
+                )}
+                {project.outline && (
+                  <div className="creation-project-field">
+                    <h5>总纲</h5>
+                    <p>{project.outline}</p>
+                  </div>
+                )}
+                {hasConcepts && (
+                  <div className="creation-project-field">
+                    <h5>初始人物 ({project.initial_concepts.length})</h5>
+                    <ul>
+                      {project.initial_concepts.map((c, i) => (
+                        <li key={i}>
+                          <strong>{c.name}</strong>
+                          {c.attributes && Object.keys(c.attributes).length > 0 && (
+                            <span className="muted small"> · {JSON.stringify(c.attributes)}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {project.style_pref && Object.keys(project.style_pref).length > 0 && (
+                  <div className="creation-project-field">
+                    <h5>文风偏好</h5>
+                    <ul>
+                      {Object.entries(project.style_pref).map(([k, v]) => (
+                        <li key={k}><strong>{k}</strong>: {String(v) || '—'}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <div className="creation-project-card-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => setEditingProject(true)}
+                  >
+                    ✎ 编辑设定
+                  </button>
+                </div>
+              </div>
+            )}
+          </details>
+        </section>
       </div>
     </aside>
   );
@@ -1373,34 +1402,68 @@ function GenerationProgress({ progress }) {
   }
   const stage = progress.stage || 'start';
   const variants = progress.variants || {};
-  const variantCount = Object.keys(variants).length;
+  const attemptScores = progress.attempt_scores || [];
+  const isSingle = progress.mode === 'single' || variants[0] != null && variants[1] == null && variants[2] == null;
+  const threshold = progress.score_threshold;
   return (
     <div className="creation-generation-progress">
-      <h4>生成中: {stage}</h4>
+      <h4>
+        {isSingle ? '单候选生成' : '生成中'}: {stage}
+        {progress.attempt ? ` · 第 ${progress.attempt} / ${progress.max_attempts || progress.max_revise + 1 || '?'} 轮` : ''}
+      </h4>
+      {isSingle && typeof threshold === 'number' && (
+        <div className="muted small">
+          Critic 通过阈值: ≥ {threshold.toFixed(1)}/10
+          {attemptScores.length > 0 && (
+            <> · 历次评分: {attemptScores
+              .map((a) => `${a.attempt}:${a.score.toFixed(1)}`)
+              .join(' / ')}</>
+          )}
+        </div>
+      )}
       {progress.directions && progress.directions.length > 0 && (
         <div className="muted small">
           Planner 已生成 {progress.directions.length} 个分叉方向
+          {isSingle && ' (本模式仅取方向 0 撰写)'}
         </div>
       )}
-      {variantCount > 0 && (
+      {progress.bridge_score != null && (
+        <div className="muted small">
+          🔗 接缝质量 {progress.bridge_score.toFixed(1)}/10
+          {progress.bridge_conflicts && progress.bridge_conflicts.length > 0 &&
+            ` · ${progress.bridge_conflicts.length} 个承接冲突`}
+        </div>
+      )}
+      {stage === 'revision_start' && (
+        <p className="creation-progress-revision">
+          🔁 第 {progress.attempt} 轮重做中 (上轮评分 {progress.previous_score?.toFixed(1)}/10 未达阈值)
+        </p>
+      )}
+      {stage === 'critic_rejected' && progress.last_rejected && (
+        <p className="creation-progress-rejection">
+          ✗ 第 {progress.last_rejected.attempt} 轮 Critic 未通过
+          ({progress.last_rejected.score?.toFixed(1)}/10
+          {' < '}{progress.last_rejected.threshold?.toFixed(1)})
+        </p>
+      )}
+      {Object.keys(variants).length > 0 && (
         <ul className="creation-progress-variants">
-          {[0, 1, 2].map((i) => {
-            const v = variants[i];
-            if (!v) return (
-              <li key={i} className="creation-progress-variant pending">
-                <span>版本 {i + 1}</span>
-                <span className="muted small">等待</span>
-              </li>
-            );
+          {Object.entries(variants).map(([idx, v]) => {
+            const i = Number(idx);
             return (
               <li key={i} className={`creation-progress-variant ${v.state || 'pending'}`}>
-                <span>版本 {i + 1}</span>
+                <span>
+                  {isSingle ? '正文' : `版本 ${i + 1}`}
+                  {typeof v.word_count === 'number' ? ` (${v.word_count} 字)` : ''}
+                </span>
                 <span>
                   {v.state === 'done'
-                    ? `完成 · 评分 ${v.score ?? '?'}`
-                    : v.state === 'critiquing'
-                      ? `Critic 审核中 (${v.word_count || '?'} 字)`
-                      : '撰写中'}
+                    ? `✓ 通过 · 评分 ${v.score?.toFixed(1) ?? '?'}/10`
+                    : v.state === 'rejected'
+                      ? `✗ 未通过 · 评分 ${v.score?.toFixed(1) ?? '?'}/10`
+                      : v.state === 'critiquing'
+                        ? `Critic 审核中…`
+                        : 'Planner / Writer 撰写中…'}
                 </span>
               </li>
             );

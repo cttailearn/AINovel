@@ -754,6 +754,15 @@ class AiChapterGenerateRequest(BaseModel):
         default=None, ge=1, description="不传则用 project.current_chapter_no"
     )
     title: str = Field(default="", max_length=200)
+    # 生成模式:
+    #   - "single":     一次只产 1 个候选, Critic 不达标就重做 Planner+Writer (推荐)
+    #   - "candidates": 兼容旧版 3 候选并行 (candidates 模式)
+    mode: Literal["single", "candidates"] = Field(default="single")
+    # Critic 循环最多重试次数 (含首次), 单模式下生效.
+    # 0 = 跑 1 次就接受, 1 = 最多重做 1 次, 类推. 默认 2 表示最多 3 轮.
+    max_revise: int = Field(default=2, ge=0, le=5)
+    # Critic overall 分数达到该阈值即视为通过, 立即收尾.
+    score_threshold: float = Field(default=7.0, ge=0.0, le=10.0)
 
 
 class AiChapterSelectRequest(BaseModel):

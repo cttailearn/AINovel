@@ -7,6 +7,7 @@ import { Workbench } from './components/Workbench.jsx';
 import { ImageGenerationPage } from './components/ImageGenerationPage.jsx';
 import { EnrichmentTaskBanner } from './components/EnrichmentTaskBanner.jsx';
 import { EnrichmentTaskProvider, useEnrichmentTask } from './state/EnrichmentTaskContext.jsx';
+import { CreationTaskProvider } from './state/CreationTaskContext.jsx';
 import { CreationStudio } from './components/creation/CreationStudio.jsx';
 import { useTheme } from './ThemeContext.jsx';
 import './App.css';
@@ -120,7 +121,9 @@ const PAGE_META = {
 export default function App() {
   return (
     <EnrichmentTaskProvider>
-      <AppShell />
+      <CreationTaskProvider>
+        <AppShell />
+      </CreationTaskProvider>
     </EnrichmentTaskProvider>
   );
 }

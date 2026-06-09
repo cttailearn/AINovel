@@ -1989,6 +1989,32 @@
   color: #047857;
 }
 
+.creation-progress-variant.rejected {
+  background: #fef2f2;
+  border-color: #ef4444;
+  color: #b91c1c;
+}
+
+.creation-progress-revision {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #f59e0b;
+  background: #fffbeb;
+  border-radius: 3px;
+  font-size: 13px;
+  color: #92400e;
+}
+
+.creation-progress-rejection {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #ef4444;
+  background: #fef2f2;
+  border-radius: 3px;
+  font-size: 13px;
+  color: #b91c1c;
+}
+
 .creation-confirmed {
   flex: 1 1 auto;
   padding: 16px;
@@ -2334,7 +2360,10 @@
 /* --- 三栏主区 --- */
 .creation-workspace-body.creation-workspace-notion-body {
   display: grid;
-  grid-template-columns: 280px 1fr 320px;
+  /* 布局: 章节大纲 / 主工作区 / 设定+KG, 用户要求加宽以放下更多内容.
+     中心列用 minmax(0, 1fr) 防止 SVG/长文本撑爆网格, 同时保证左右侧
+     在窄屏下能拿到最小宽度不至于内容被压扁. */
+  grid-template-columns: 260px minmax(0, 1fr) 380px;
   gap: 0;
   flex: 1 1 auto;
   min-height: 0;
@@ -2343,21 +2372,21 @@
 }
 
 .creation-workspace-body.creation-workspace-notion-body.is-reference-collapsed {
-  grid-template-columns: 280px 1fr 0;
+  grid-template-columns: 260px minmax(0, 1fr) 0;
 }
 
-@media (max-width: 1280px) {
+@media (max-width: 1366px) {
   .creation-workspace-body.creation-workspace-notion-body {
-    grid-template-columns: 240px 1fr 280px;
+    grid-template-columns: 240px minmax(0, 1fr) 320px;
   }
 }
 
 @media (max-width: 1024px) {
   .creation-workspace-body.creation-workspace-notion-body {
-    grid-template-columns: 220px 1fr 0;
+    grid-template-columns: 220px minmax(0, 1fr) 0;
   }
   .creation-workspace-body.creation-workspace-notion-body.is-reference-collapsed {
-    grid-template-columns: 220px 1fr 0;
+    grid-template-columns: 220px minmax(0, 1fr) 0;
   }
 }
 
@@ -2500,6 +2529,44 @@
   border: 1px solid var(--border-color, #e5e7eb);
   border-radius: 8px;
   padding: 10px 12px;
+}
+
+/* 可折叠的 section (项目设定) — 用 <details> 包裹, 默认折叠 */
+.creation-reference-section-collapsible > details > summary {
+  list-style: none;
+  cursor: pointer;
+  margin: 0 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #111827);
+  user-select: none;
+}
+.creation-reference-section-collapsible > details > summary::-webkit-details-marker {
+  display: none; /* 隐藏 Chrome 默认的小三角 */
+}
+.creation-reference-section-collapsible > details > summary::before {
+  content: "▸";
+  display: inline-block;
+  font-size: 11px;
+  color: var(--text-muted, #6b7280);
+  transition: transform 0.15s ease;
+  width: 12px;
+  text-align: center;
+}
+.creation-reference-section-collapsible > details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.creation-reference-section-collapsible > details[open] > summary {
+  margin-bottom: 10px;
+  border-bottom: 1px dashed var(--border-color, #e5e7eb);
+  padding-bottom: 6px;
+}
+.creation-reference-section-summary-title {
+  flex: 0 0 auto;
 }
 
 .creation-reference-section h4 {

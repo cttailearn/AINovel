@@ -238,6 +238,120 @@ export function postStream(path, body, { onEvent, signal } = {}) {
 }
 
 
+/**
+ * 通过 GET 订阅一个已存在的 Server-Sent Events 流.
+ *
+ * 用 fetch + ReadableStream 实现, 支持 ``signal`` 取消. 用于刷新页面后
+ * 重新挂上已经在跑的后台任务, 不需要再次触发业务逻辑.
+ */
+export function getEventStream(url, { onEvent, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const controller = new AbortController();
+    if (signal) {
+      if (signal.aborted) {
+        reject(new DOMException('请求已取消', 'AbortError'));
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        try { controller.abort(); } catch { /* noop */ }
+      });
+    }
+    let closed = false;
+    const onAbort = () => {
+      if (closed) return;
+      closed = true;
+      try { controller.abort(); } catch { /* noop */ }
+    };
+    if (signal) signal.addEventListener('abort', onAbort);
+    fetch(url, {
+      method: 'GET',
+      headers: { Accept: 'text/event-stream' },
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          let payload = null;
+          try {
+            const text = await response.text();
+            payload = text ? JSON.parse(text) : null;
+          } catch { /* noop */ }
+          const detail = payload && payload.detail ? payload.detail : response.statusText;
+          closed = true;
+          reject(new ApiError(
+            detail || `请求失败 (${response.status})`,
+            response.status,
+            payload,
+          ));
+          return;
+        }
+        // 调用方负责 dispose; 真正结束 (服务端发完关闭) 时 resolve
+        const reader = response.body && response.body.getReader
+          ? response.body.getReader()
+          : null;
+        if (!reader) {
+          closed = true;
+          reject(new ApiError('当前浏览器不支持流式响应', 0, null));
+          return;
+        }
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        try {
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buffer.indexOf('\n\n')) >= 0) {
+              const block = buffer.slice(0, idx);
+              buffer = buffer.slice(idx + 2);
+              for (const raw of block.split(/\r?\n/)) {
+                if (!raw.startsWith('data:')) continue;
+                const body = raw.slice(5).trim();
+                if (!body) continue;
+                try {
+                  onEvent?.(JSON.parse(body));
+                } catch {
+                  // ignore non-JSON keepalive lines
+                }
+              }
+            }
+          }
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            closed = true;
+            reject(new DOMException('请求已取消', 'AbortError'));
+            return;
+          }
+          closed = true;
+          reject(err);
+          return;
+        }
+        closed = true;
+        if (buffer.trim()) {
+          const tail = buffer.trim();
+          if (tail.startsWith('data:')) {
+            const body = tail.slice(5).trim();
+            if (body) {
+              try { onEvent?.(JSON.parse(body)); } catch { /* noop */ }
+            }
+          }
+        }
+        resolve();
+      })
+      .catch((err) => {
+        if (closed) return;
+        closed = true;
+        if (err && (err.name === 'AbortError' || err.message === '请求已取消')) {
+          reject(new DOMException('请求已取消', 'AbortError'));
+        } else {
+          reject(err instanceof Error ? err : new ApiError(String(err), 0, null));
+        }
+      });
+  });
+}
+
+
 export const api = {
   health: () => apiRequest('/health'),
   models: {
@@ -430,6 +544,25 @@ export const api = {
       }),
     history: (chapterId, options) =>
       apiRequest(`/enrichment/chapters/${chapterId}/history`, options),
+  },
+  tasks: {
+    // 查询当前活跃任务 (刷新页面时调用, 找到残留任务)
+    listActive: ({ kind, subjectId, includeRecent } = {}, options) => {
+      const params = new URLSearchParams();
+      if (kind) params.set('kind', kind);
+      if (subjectId != null) params.set('subject_id', String(subjectId));
+      if (includeRecent) params.set('include_recent', 'true');
+      const qs = params.toString();
+      return apiRequest(`/tasks/active${qs ? `?${qs}` : ''}`, options);
+    },
+    // 查询单个任务
+    get: (taskId, options) => apiRequest(`/tasks/${taskId}`, options),
+    // 跨连接取消
+    cancel: (taskId, options) =>
+      apiRequest(`/tasks/${taskId}/cancel`, { method: 'POST', ...options }),
+    // 重新订阅 SSE 事件流 (用于刷新后)
+    subscribeUrl: (taskId) =>
+      `${API_PREFIX}/tasks/${taskId}/events`,
   },
   creation: {
     // 项目

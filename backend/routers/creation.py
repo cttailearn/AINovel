@@ -3,6 +3,11 @@
 Mounted at ``/api/creation``. The chapter generation endpoint
 (``POST /projects/{id}/chapters/generate``) is a Server-Sent Events stream;
 the client uses ``api.creation.generate`` in the frontend.
+
+任务持久化
+----------
+与 enrichment 一致: 章节生成任务在 ``TaskRegistry`` 中以应用作用域的形式
+跑. SSE 客户端断开不再取消任务, 用户刷新后通过 ``task_id`` 重新订阅即可.
 """
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ from schemas import (
     AiProjectUpdate,
 )
 from services import creation_intake_service, creation_service
+from services.task_registry import KIND_CREATION, registry
 
 logger = logging.getLogger(__name__)
 
@@ -255,49 +261,90 @@ async def generate_chapter(project_id: int, payload: AiChapterGenerateRequest):
     """SSE 推送 Planner / Writer / Critic 阶段事件.
 
     事件类型参见 ``creation_service.generate_chapter_streaming``.
-    """
-    progress_queue: asyncio.Queue = asyncio.Queue()
-    cancel_flag = {"cancelled": False}
 
-    def _should_cancel() -> bool:
-        return cancel_flag["cancelled"]
+    任务以应用作用域的 ``TaskRecord`` 形式跑在 ``TaskRegistry`` 中, 同一
+    项目同时只允许 1 个生成任务. SSE 客户端断开不再取消任务.
+    """
+    # 校验项目存在, 顺便拿到 title 用于 banner 文案
+    try:
+        project = await creation_service.get_project_detail(project_id)
+    except creation_service.CreationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        record = await registry.register(
+            kind=KIND_CREATION,
+            subject_id=project_id,
+            title=str(project.get("project", {}).get("title") or f"项目 {project_id}"),
+            meta={
+                "chapter_no": payload.chapter_no,
+                "user_intent": payload.user_intent or "",
+                "title_hint": payload.title or "",
+                "mode": payload.mode,
+                "max_revise": payload.max_revise,
+                "score_threshold": payload.score_threshold,
+            },
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     async def _runner() -> None:
+        final_state = "complete"
         try:
             async for ev in creation_service.generate_chapter_streaming(
                 project_id,
                 user_intent=payload.user_intent,
                 chapter_no=payload.chapter_no,
                 title=payload.title,
+                mode=payload.mode,
+                max_revise=payload.max_revise,
+                score_threshold=payload.score_threshold,
             ):
-                if _should_cancel():
+                if record.should_cancel():
+                    final_state = "cancelled"
+                    await record.publish(
+                        {"event": "cancelled", "chapter_no": payload.chapter_no}
+                    )
                     break
-                await progress_queue.put(ev)
+                await record.publish(ev)
+            if record.should_cancel():
+                final_state = "cancelled"
         except Exception as exc:  # noqa: BLE001
             logger.exception("chapter generation crashed: %s", exc)
-            await progress_queue.put(
+            await record.publish(
                 {"event": "error", "message": f"生成异常: {exc}"}
             )
+            final_state = "error"
         finally:
-            await progress_queue.put({"event": "__end__"})
+            await registry.finish(record.task_id, final_state)
+
+    # 启动应用作用域的后台任务
+    asyncio.create_task(_runner())
+
+    # 第一个事件携带 task_id, 方便前端持久化
+    await record.publish(
+        {
+            "event": "registered",
+            "task_id": record.task_id,
+            "project_id": project_id,
+            "chapter_no": payload.chapter_no,
+        }
+    )
 
     async def event_stream() -> AsyncIterator[bytes]:
-        task = asyncio.create_task(_runner())
+        rec = registry.get(record.task_id)
+        if not rec:
+            yield _sse_format("error", {"message": "任务不存在或已清理"})
+            return
         try:
-            while True:
-                ev = await progress_queue.get()
-                if ev.get("event") == "__end__":
-                    break
-                yield _sse_format(ev.get("event", "message"), ev)
-            if not task.done():
-                try:
-                    await asyncio.wait_for(task, timeout=1.0)
-                except asyncio.TimeoutError:
-                    task.cancel()
-        finally:
-            cancel_flag["cancelled"] = True
-            if not task.done():
-                task.cancel()
+            async for ev in rec.subscribe():
+                event_name = ev.get("event") or "message"
+                yield _sse_format(event_name, ev)
+        except asyncio.CancelledError:
+            logger.info(
+                "creation subscribe: client disconnected from %s", record.task_id
+            )
+            raise
 
     return StreamingResponse(
         event_stream(),

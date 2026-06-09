@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -394,18 +395,58 @@ async def generate_chapter_streaming(
     user_intent: str = "",
     chapter_no: Optional[int] = None,
     title: str = "",
+    mode: str = "single",
+    max_revise: int = 2,
+    score_threshold: float = 7.0,
 ) -> AsyncIterator[Dict[str, Any]]:
-    """单章节三 Agent 生成, 通过 SSE 推事件.
+    """单章节生成入口, 按 ``mode`` 派发到单候选/3 候选两套流水线.
 
-    事件类型:
-      - start:           整章开始 (含 chapter_id, chapter_no, title, model_id)
-      - planner_done:    Planner 完毕, 附 3 个方向
-      - title_generated: 用户没填标题时, 综合 3 方向自动生成的章节标题
-      - writer_i_done:   第 i 个方向写作完毕, 附内容预览
-      - critic_i_done:   第 i 个候选审核完毕, 附 score + report
-      - done:            整章完成 (chapter.status=generated, 含最终 title)
+    模式:
+      - "single" (默认): 一次只产 1 个候选, Critic 不达标就回到 Planner
+        + Writer 重新生成, 直到达标或达到 max_revise 轮. 见
+        ``_generate_chapter_streaming_single``.
+      - "candidates": 兼容旧版三候选并行, 行为与 v0.3.x 保持一致.
+
+    事件类型 ("single" 模式):
+      - start:           整章开始
+      - planner_done:    Planner 完毕, 附 1 个方向 (用户/前端可忽略多个方向的兼容事件)
+      - title_generated: 用户没填标题时, 自动生成的章节标题
+      - writer_0_done:   Writer 完毕, 附内容预览
+      - critic_0_done:   Critic 审核完毕, 附 score + report
+      - critic_rejected: Critic 未通过, 附 issues / modifications, 即将重做
+      - revision_start:  开始新一轮 Planner + Writer
+      - done:            整章完成 (chapter.status=selected, 1 个 variant 自动选中)
       - error:           异常
     """
+    if mode == "single":
+        async for ev in _generate_chapter_streaming_single(
+            project_id,
+            user_intent=user_intent,
+            chapter_no=chapter_no,
+            title=title,
+            max_revise=max_revise,
+            score_threshold=score_threshold,
+        ):
+            yield ev
+        return
+    # legacy 3-candidates 流水线
+    async for ev in _generate_chapter_streaming_candidates(
+        project_id,
+        user_intent=user_intent,
+        chapter_no=chapter_no,
+        title=title,
+    ):
+        yield ev
+
+
+async def _generate_chapter_streaming_candidates(
+    project_id: int,
+    *,
+    user_intent: str = "",
+    chapter_no: Optional[int] = None,
+    title: str = "",
+) -> AsyncIterator[Dict[str, Any]]:
+    """兼容旧版 3 候选并行流水线 (candidates 模式)."""
     project = await db.get_ai_project(project_id)
     if not project:
         yield {"event": "error", "message": f"项目 {project_id} 不存在"}
@@ -692,6 +733,348 @@ async def generate_chapter_streaming(
 
 
 # ---------------------------------------------------------------------------
+# ④ 单候选 + Critic 循环 (新流水线, 默认模式)
+# ---------------------------------------------------------------------------
+
+
+def _format_critic_feedback(critic_out) -> str:
+    """把 Critic 输出压缩成 Planner / Writer 可消化的反馈文本."""
+    parts: List[str] = []
+    if critic_out.issues:
+        parts.append("## 必须修复的问题")
+        for x in critic_out.issues[:8]:
+            parts.append(f"- {x}")
+    if critic_out.modifications:
+        parts.append("## 建议改进")
+        for x in critic_out.modifications[:8]:
+            parts.append(f"- {x}")
+    if critic_out.kg_conflicts:
+        parts.append("## 与知识图谱的冲突")
+        for c in critic_out.kg_conflicts[:5]:
+            parts.append(f"- {c}")
+    parts.append(
+        f"## 综合评分\n{critic_out.overall:.1f}/10 — 需 >= score_threshold 才能通过."
+    )
+    return "\n".join(parts)
+
+
+async def _generate_chapter_streaming_single(
+    project_id: int,
+    *,
+    user_intent: str = "",
+    chapter_no: Optional[int] = None,
+    title: str = "",
+    max_revise: int = 2,
+    score_threshold: float = 7.0,
+) -> AsyncIterator[Dict[str, Any]]:
+    """单候选生成: 1 个 Planner 方向 -> 1 个 Writer -> 1 个 Critic.
+    Critic 不达标就带反馈回到 Planner + Writer 重做, 直到达标或达到
+    ``max_revise`` 轮. 最终自动写入 1 个 variant 并 ``selected_variant_id``
+    指向它, 章节状态 ``selected``, 前端直接进编辑器.
+
+    事件列表见 ``generate_chapter_streaming`` 文档.
+    """
+    project = await db.get_ai_project(project_id)
+    if not project:
+        yield {"event": "error", "message": f"项目 {project_id} 不存在"}
+        return
+
+    try:
+        model_cfg = await _resolve_model_cfg(project)
+    except CreationError as exc:
+        yield {"event": "error", "message": str(exc)}
+        return
+
+    target_chapter_no = int(chapter_no or project.get("current_chapter_no") or 1)
+    existing = await db.list_ai_chapters(project_id)
+    for ch in existing:
+        if int(ch.get("chapter_no")) == target_chapter_no:
+            await db.delete_ai_chapter(int(ch["id"]))
+
+    chapter_id = await db.create_ai_chapter(
+        project_id=project_id,
+        chapter_no=target_chapter_no,
+        title=title.strip(),
+        user_intent=user_intent.strip(),
+        status="generating",
+    )
+
+    yield {
+        "event": "start",
+        "chapter_id": chapter_id,
+        "chapter_no": target_chapter_no,
+        "title": title.strip(),
+        "model_id": model_cfg.get("id"),
+        "mode": "single",
+        "max_revise": max_revise,
+        "score_threshold": score_threshold,
+    }
+
+    planner = PlannerAgent()
+    writer = WriterAgent()
+    critic = CriticAgent()
+
+    project_id_int = int(project["id"])
+    kg_context_base = await _kg_context_for(project_id_int)
+    last_chapter_tail = await _get_last_chapter_tail(project_id_int)
+    last_summary = await _get_last_chapter_summary(project_id_int)
+
+    # BridgeAgent 仅在有上一章时跑一次, 跟 candidates 流水线保持一致
+    bridge_context = ""
+    if last_chapter_tail:
+        try:
+            from services.creation_agents import BridgeAgent
+            bridge_agent = BridgeAgent()
+            bridge_out = await bridge_agent.run(
+                model_cfg=model_cfg,
+                prev_tail=last_chapter_tail,
+                # 给个 stub direction, BridgeAgent 只看 prev_tail 与 kg_warnings
+                # 但签名要求 direction, 这里塞一个空对象
+                direction=PlannerDirection(
+                    index=0, title="", synopsis="", key_event=""
+                ),
+                kg_warnings="(无)",
+            )
+            bridge_lines: List[str] = []
+            if bridge_out.open_hook_suggestions:
+                bridge_lines.append("## BridgeAgent 开头钩子推荐")
+                for h in bridge_out.open_hook_suggestions[:3]:
+                    bridge_lines.append(f"- {h}")
+            if bridge_out.conflicts:
+                bridge_lines.append("## BridgeAgent 冲突提示")
+                for c in bridge_out.conflicts[:3]:
+                    bridge_lines.append(f"- {c}")
+            if bridge_out.bridge_score < 7.0:
+                bridge_lines.append(
+                    f"⚠ 接缝质量较低 ({bridge_out.bridge_score:.1f}/10), 下一章需要更自然承接"
+                )
+            if bridge_lines:
+                bridge_context = "\n".join(bridge_lines)
+            yield {
+                "event": "bridge_done",
+                "bridge_score": bridge_out.bridge_score,
+                "conflicts": bridge_out.conflicts,
+                "open_hooks": bridge_out.open_hook_suggestions,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("bridge LLM failed: %s", exc)
+
+    # 自动标题 (仅用户未填时跑一次, 后续轮次复用)
+    chapter_title = title.strip()
+    auto_title = False
+    if not chapter_title:
+        try:
+            # 先用空 directions 跑一次, 让 LLM 知道我们要写啥; 后面 Planner 出方向
+            # 后, 如果标题显得太离谱, 我们会基于最终方向再覆盖一次.
+            chapter_title = await generate_chapter_title(
+                model_cfg=model_cfg,
+                project_title=project.get("title", ""),
+                directions=[
+                    PlannerDirection(
+                        index=0,
+                        title="(待规划)",
+                        synopsis=user_intent or "(基于用户意图生成)",
+                        focus="综合",
+                    )
+                ],
+                chapter_no=target_chapter_no,
+                user_intent=user_intent,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("chapter_title failed, fallback: %s", exc)
+            chapter_title = f"第 {target_chapter_no} 章"
+        auto_title = True
+    try:
+        await db.update_ai_chapter(chapter_id, title=chapter_title)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to persist auto-title: %s", exc)
+    yield {
+        "event": "title_generated",
+        "chapter_id": chapter_id,
+        "title": chapter_title,
+        "auto": auto_title,
+    }
+
+    max_attempts = max_revise + 1  # 含首次
+    last_critic = None
+    accepted = False
+    final_overall = 0.0
+    last_writer_out = None
+    last_direction = None
+    last_kg_context_used = ""
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            yield {
+                "event": "revision_start",
+                "chapter_id": chapter_id,
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "previous_score": last_critic.overall if last_critic else 0.0,
+            }
+
+        # 1. Planner (带 Critic 反馈, 如有)
+        feedback_text = _format_critic_feedback(last_critic) if last_critic else ""
+        try:
+            planner_inputs = await _build_planner_inputs(
+                project, user_intent, target_chapter_no
+            )
+            planner_out = await planner.run(
+                model_cfg=model_cfg,
+                feedback=feedback_text,
+                **planner_inputs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("planner failed (attempt %s)", attempt)
+            yield {
+                "event": "error",
+                "message": f"Planner 失败: {exc}",
+                "chapter_id": chapter_id,
+            }
+            return
+
+        # 单候选模式只取 Planner 输出的方向 0 (焦点: 动作, 其它两个忽略)
+        if not planner_out.directions:
+            yield {"event": "error", "message": "Planner 未返回任何方向", "chapter_id": chapter_id}
+            return
+        direction = planner_out.directions[0]
+        yield {
+            "event": "planner_done",
+            "chapter_id": chapter_id,
+            "attempt": attempt,
+            "directions": [direction.to_dict()],
+        }
+
+        # 2. Writer
+        kg_context_for_writer = (
+            kg_context_base + ("\n\n" + bridge_context if bridge_context else "")
+        )
+        try:
+            writer_out = await writer.run(
+                model_cfg=model_cfg,
+                project=project,
+                direction=direction,
+                kg_context=kg_context_for_writer,
+                last_chapter_tail=last_chapter_tail,
+                user_intent=user_intent,
+                chapter_no=target_chapter_no,
+                chapter_title=chapter_title,
+                feedback=feedback_text,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("writer failed (attempt %s)", attempt)
+            yield {
+                "event": "error",
+                "message": f"Writer 失败: {exc}",
+                "chapter_id": chapter_id,
+            }
+            return
+
+        yield {
+            "event": "writer_0_done",
+            "chapter_id": chapter_id,
+            "attempt": attempt,
+            "preview": writer_out.content[:300],
+            "word_count": _ascii_word_count(writer_out.content),
+        }
+        last_writer_out = writer_out
+        last_direction = direction
+        last_kg_context_used = kg_context_for_writer
+
+        # 3. Critic
+        try:
+            critic_out = await critic.run(
+                model_cfg=model_cfg,
+                project=project,
+                direction=direction,
+                chapter_content=writer_out.content,
+                kg_context=kg_context_base,
+                last_chapter_summary=last_summary,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("critic failed (attempt %s)", attempt)
+            yield {
+                "event": "error",
+                "message": f"Critic 失败: {exc}",
+                "chapter_id": chapter_id,
+            }
+            return
+
+        yield {
+            "event": "critic_0_done",
+            "chapter_id": chapter_id,
+            "attempt": attempt,
+            "score": critic_out.overall,
+            "passed": critic_out.overall >= score_threshold,
+            "issues": critic_out.issues,
+            "modifications": critic_out.modifications,
+            "kg_conflicts": critic_out.kg_conflicts,
+        }
+        last_critic = critic_out
+        final_overall = critic_out.overall
+
+        if critic_out.overall >= score_threshold:
+            accepted = True
+            break
+
+        # Critic 未通过, 若是最后一轮, 也直接收尾 (用户允许有未达标)
+        if attempt < max_attempts:
+            yield {
+                "event": "critic_rejected",
+                "chapter_id": chapter_id,
+                "attempt": attempt,
+                "score": critic_out.overall,
+                "threshold": score_threshold,
+                "issues": critic_out.issues,
+                "modifications": critic_out.modifications,
+            }
+
+    # 4. 收尾: 写入 1 个 variant, 自动选中, 状态=selected
+    variant_id = await db.insert_ai_variant(
+        chapter_id=chapter_id,
+        variant_index=0,
+        planner_direction=(
+            f"[{last_direction.focus}] {last_direction.title}\n"
+            f"{last_direction.synopsis}\n核心事件: {last_direction.key_event}"
+        ),
+        content=last_writer_out.content,
+        focus_summary=last_writer_out.focus_summary,
+        kg_diff={
+            "key_event": last_direction.key_event,
+            "focus": last_direction.focus,
+            "themes": getattr(last_direction, "themes", None) or [],
+        },
+        critic_report=last_critic.to_dict() if last_critic else {},
+        score=final_overall,
+        model_id=model_cfg.get("id"),
+    )
+
+    # 写入正文字数, 并把 selected_variant_id / final_content 落到章节行,
+    # 章节状态设为 "selected", 前端直接进 VariantEditor.
+    await db.update_ai_chapter(
+        chapter_id,
+        selected_variant_id=variant_id,
+        final_content=last_writer_out.content,
+        word_count=_ascii_word_count(last_writer_out.content),
+        status="selected",
+    )
+    await db.update_ai_project(
+        project_id,
+        current_chapter_no=target_chapter_no + 1,
+    )
+
+    yield {
+        "event": "done",
+        "chapter_id": chapter_id,
+        "variant_id": variant_id,
+        "title": chapter_title,
+        "attempts": attempt,
+        "accepted": accepted,
+        "final_score": final_overall,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Chapter operations (post-generation)
 # ---------------------------------------------------------------------------
 
@@ -774,6 +1157,16 @@ async def get_chapter_detail(chapter_id: int) -> Dict[str, Any]:
         )
         if v:
             ch["final_content"] = v.get("content") or ""
+    # ⑦ Compass 字段反解: 数据库里是 JSON 字符串 / NULL / 列表 三种形态,
+    # schema (AiChapterOut) 要求 compass_warnings 必须是 List, 必须统一成 list.
+    cw = ch.get("compass_warnings")
+    if isinstance(cw, str) and cw.strip():
+        try:
+            ch["compass_warnings"] = json.loads(cw)
+        except (TypeError, ValueError):
+            ch["compass_warnings"] = []
+    elif not isinstance(cw, list):
+        ch["compass_warnings"] = []
     return ch
 
 

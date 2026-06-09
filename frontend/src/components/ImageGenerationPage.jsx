@@ -2,6 +2,32 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../api/client.js';
 import { useToast } from './Toast/ToastProvider.jsx';
 
+// 持久化图像生成页面的"表单 + 最近结果", 让刷新/切页之后能直接续上.
+// 引用图是二进制, 不进 localStorage; 用户重新进入页面只需重新上传.
+const FORM_KEY = 'ainovel.imageGen.form.v1';
+const RESULTS_KEY = 'ainovel.imageGen.results.v1';
+const LAST_TASK_KEY = 'ainovel.imageGen.lastTask.v1';
+const MAX_PERSISTED_RESULTS = 30; // 防止 localStorage 超限 (5MB / 项)
+
+function readJSON(key, fallback) {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    const data = JSON.parse(raw);
+    return data ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+function writeJSON(key, value) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (value == null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, JSON.stringify(value));
+  } catch { /* noop */ }
+}
+
 const ASPECT_OPTIONS = [
   { value: '1:1', label: '1:1 (1024×1024)' },
   { value: '16:9', label: '16:9 (1280×720)' },
@@ -90,30 +116,83 @@ export function ImageGenerationPage({ models, topSearch }) {
   const toast = useToast();
   const [imageModels, setImageModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(true);
-  const [selectedModelId, setSelectedModelId] = useState(null);
+  // 模型选择也持久化, 默认值 fallback 为 null 由下方 effect 兜底
+  const [selectedModelId, setSelectedModelId] = useState(() => {
+    const saved = readJSON(FORM_KEY, null);
+    return saved && saved.selectedModelId != null ? saved.selectedModelId : null;
+  });
 
-  const [mode, setMode] = useState('text');
-  const [prompt, setPrompt] = useState(
-    '一位少女站在开满樱花的校园小路中央，午后阳光透过花瓣洒下，电影感构图',
-  );
-  const [negativePrompt, setNegativePrompt] = useState('');
-  const [aspectRatio, setAspectRatio] = useState('1:1');
-  const [n, setN] = useState(1);
-  const [seed, setSeed] = useState('');
-  const [styleType, setStyleType] = useState('');
-  const [styleWeight, setStyleWeight] = useState(0.8);
-  const [promptOptimizer, setPromptOptimizer] = useState(false);
-  const [aigcWatermark, setAigcWatermark] = useState(false);
-  const [responseFormat, setResponseFormat] = useState('url');
+  const [mode, setMode] = useState(() => readJSON(FORM_KEY, { mode: 'text' }).mode || 'text');
+  const [prompt, setPrompt] = useState(() => {
+    const saved = readJSON(FORM_KEY, null);
+    return saved && typeof saved.prompt === 'string'
+      ? saved.prompt
+      : '一位少女站在开满樱花的校园小路中央，午后阳光透过花瓣洒下，电影感构图';
+  });
+  const [negativePrompt, setNegativePrompt] = useState(() => {
+    const saved = readJSON(FORM_KEY, null);
+    return saved ? saved.negativePrompt || '' : '';
+  });
+  const [aspectRatio, setAspectRatio] = useState(() => readJSON(FORM_KEY, { aspectRatio: '1:1' }).aspectRatio);
+  const [n, setN] = useState(() => Number(readJSON(FORM_KEY, { n: 1 }).n) || 1);
+  const [seed, setSeed] = useState(() => {
+    const saved = readJSON(FORM_KEY, null);
+    return saved ? saved.seed || '' : '';
+  });
+  const [styleType, setStyleType] = useState(() => readJSON(FORM_KEY, { styleType: '' }).styleType);
+  const [styleWeight, setStyleWeight] = useState(() => {
+    const v = Number(readJSON(FORM_KEY, { styleWeight: 0.8 }).styleWeight);
+    return Number.isFinite(v) ? v : 0.8;
+  });
+  const [promptOptimizer, setPromptOptimizer] = useState(() => Boolean(readJSON(FORM_KEY, { promptOptimizer: false }).promptOptimizer));
+  const [aigcWatermark, setAigcWatermark] = useState(() => Boolean(readJSON(FORM_KEY, { aigcWatermark: false }).aigcWatermark));
+  const [responseFormat, setResponseFormat] = useState(() => readJSON(FORM_KEY, { responseFormat: 'url' }).responseFormat);
 
-  const [references, setReferences] = useState([]); // [{ name, size, dataUri }]
+  const [references, setReferences] = useState([]); // [{ name, size, dataUri }] — 二进制, 不进 localStorage
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
 
   const [generating, setGenerating] = useState(false);
-  const [lastTask, setLastTask] = useState(null);
-  const [results, setResults] = useState([]);
+  const [lastTask, setLastTask] = useState(() => readJSON(LAST_TASK_KEY, null));
+  const [results, setResults] = useState(() => {
+    const saved = readJSON(RESULTS_KEY, []);
+    return Array.isArray(saved) ? saved : [];
+  });
   const [error, setError] = useState(null);
+
+  // 持久化: 任一表单字段变更都写一次 localStorage (合并写, 减少 IO).
+  useEffect(() => {
+    writeJSON(FORM_KEY, {
+      selectedModelId,
+      mode,
+      prompt,
+      negativePrompt,
+      aspectRatio,
+      n,
+      seed,
+      styleType,
+      styleWeight,
+      promptOptimizer,
+      aigcWatermark,
+      responseFormat,
+    });
+  }, [
+    selectedModelId, mode, prompt, negativePrompt, aspectRatio, n, seed,
+    styleType, styleWeight, promptOptimizer, aigcWatermark, responseFormat,
+  ]);
+
+  // 持久化最近一次任务的快照 + 历史结果 (截断)
+  useEffect(() => {
+    writeJSON(LAST_TASK_KEY, lastTask);
+  }, [lastTask]);
+  useEffect(() => {
+    if (results.length === 0) {
+      writeJSON(RESULTS_KEY, null);
+      return;
+    }
+    // 只保留最近 N 条, 防止 localStorage 5MB 限制
+    writeJSON(RESULTS_KEY, results.slice(0, MAX_PERSISTED_RESULTS));
+  }, [results]);
 
   // Filter to image-capable models from the page-level `models` prop.
   const allImageModels = useMemo(
@@ -270,6 +349,9 @@ export function ImageGenerationPage({ models, topSearch }) {
     setResults([]);
     setLastTask(null);
     setError(null);
+    // 同时清掉持久化, 避免下次进入又恢复
+    writeJSON(RESULTS_KEY, null);
+    writeJSON(LAST_TASK_KEY, null);
   };
 
   const selectedModel = imageModels.find((m) => m.id === selectedModelId);

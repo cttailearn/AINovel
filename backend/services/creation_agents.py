@@ -251,6 +251,7 @@ class PlannerAgent:
         last_chapter_summary: str,
         user_intent: str,
         chapter_no: int,
+        feedback: str = "",
     ) -> PlannerOutput:
         vars_payload = {
             "project_title": project.get("title", ""),
@@ -264,6 +265,7 @@ class PlannerAgent:
             "last_chapter_summary": last_chapter_summary or "(本章为首章)",
             "user_intent": user_intent or "(无额外意图)",
             "chapter_no": str(chapter_no),
+            "feedback": (feedback or "").strip() or "(无 — 首次规划)",
         }
         prompt_str = json.dumps(vars_payload, ensure_ascii=False)
         try:
@@ -439,6 +441,7 @@ class WriterAgent:
         user_intent: str,
         chapter_no: int,
         chapter_title: str = "",
+        feedback: str = "",
     ) -> WriterOutput:
         vars_payload = {
             "project_title": project.get("title", ""),
@@ -460,6 +463,7 @@ class WriterAgent:
             "direction_key_event": direction.key_event,
             "user_intent": user_intent or "(无额外意图)",
             "chapter_no": str(chapter_no),
+            "feedback": (feedback or "").strip() or "(无 — 首次撰写)",
         }
         prompt_str = json.dumps(vars_payload, ensure_ascii=False)
         try:
