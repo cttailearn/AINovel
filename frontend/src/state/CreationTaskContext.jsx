@@ -12,6 +12,21 @@ import { ApiError, api, getEventStream } from '../api/client.js';
 const CreationTaskContext = createContext(null);
 
 const STORAGE_KEY = 'ainovel.creation.task.v1';
+// UX-#11: 跨设备/重装恢复 — 用一个稳定的 client_id 关联
+const CLIENT_ID_KEY = 'ainovel.client.id.v1';
+
+function getOrCreateClientId() {
+  if (typeof window === 'undefined') return null;
+  let id = null;
+  try {
+    id = window.localStorage.getItem(CLIENT_ID_KEY);
+    if (!id) {
+      id = `cli_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      window.localStorage.setItem(CLIENT_ID_KEY, id);
+    }
+  } catch { /* noop */ }
+  return id;
+}
 
 function readPersisted() {
   if (typeof window === 'undefined') return null;
@@ -49,6 +64,7 @@ function writePersisted(snapshot) {
  * * 即使用户在 workbench / image 页面, 任务仍在后端跑, 进度不丢.
  */
 export function CreationTaskProvider({ children }) {
+  // UX-#11: 同步从 localStorage 读; 后端镜像在 mount-effect 中异步补
   const initial = useMemo(() => readPersisted() || {}, []);
 
   const [taskId, setTaskId] = useState(initial.taskId || null);
@@ -76,7 +92,7 @@ export function CreationTaskProvider({ children }) {
       writePersisted(null);
       return;
     }
-    writePersisted({
+    const snapshot = {
       taskId,
       running,
       projectId,
@@ -86,7 +102,13 @@ export function CreationTaskProvider({ children }) {
       lastEvent,
       errorMessage,
       startTime,
-    });
+    };
+    writePersisted(snapshot);
+    // UX-#11: 同时镜像到后端, 跨设备/重装可恢复
+    const clientId = getOrCreateClientId();
+    if (clientId) {
+      api.tasks.putMirror(clientId, snapshot).catch(() => { /* 静默失败, 仍走 localStorage */ });
+    }
   }, [
     taskId,
     running,
@@ -313,6 +335,25 @@ export function CreationTaskProvider({ children }) {
     if (!taskId) return;
     let cancelled = false;
     let activeController = null;
+    // UX-#11: 优先尝试后端镜像, localStorage 没数据时也能恢复
+    const clientId = getOrCreateClientId();
+    if (clientId) {
+      api.tasks.getMirror(clientId).then((res) => {
+        if (cancelled) return;
+        if (res && res.snapshot && res.snapshot.taskId
+            && res.snapshot.taskId !== taskId) {
+          setTaskId(res.snapshot.taskId);
+          setRunning(!!res.snapshot.running);
+          setProjectId(res.snapshot.projectId || null);
+          setProjectTitle(res.snapshot.projectTitle || '');
+          setChapterNo(res.snapshot.chapterNo || null);
+          setGenProgress(res.snapshot.genProgress || null);
+          setLastEvent(res.snapshot.lastEvent || 'start');
+          setErrorMessage(res.snapshot.errorMessage || '');
+          setStartTime(res.snapshot.startTime || null);
+        }
+      }).catch(() => { /* 静默 */ });
+    }
     (async () => {
       try {
         const rec = await api.tasks.get(taskId);

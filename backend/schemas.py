@@ -746,6 +746,10 @@ class AiVariantOut(BaseModel):
     model_id: Optional[int] = None
     created_at: Optional[str] = None
     word_count: int = 0
+    # P0-#3: 版本历史
+    superseded: int = 0
+    superseded_at: Optional[str] = None
+    generation_round: int = 1
 
 
 class AiChapterGenerateRequest(BaseModel):
@@ -771,6 +775,92 @@ class AiChapterSelectRequest(BaseModel):
 
 class AiChapterContentUpdate(BaseModel):
     content: str = Field(..., min_length=0)
+
+
+# ---------------------------------------------------------------------------
+# KG 节点 / 关系编辑 (供前端手动维护图谱)
+# ---------------------------------------------------------------------------
+
+
+class AiKgCharacterCreate(BaseModel):
+    """新增 / 更新人物.
+
+    - name 必填; entity_id 在项目内必须唯一, 不传则后端用 'char_xxx' 自动生成.
+    - 其余字段均可选; attributes 会以 dict 合并存储.
+    """
+    entity_id: Optional[str] = Field(default=None, max_length=64)
+    name: str = Field(..., min_length=1, max_length=200)
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+    role: Optional[str] = Field(default=None, max_length=64)
+    faction: Optional[str] = Field(default=None, max_length=120)
+    status: Optional[str] = Field(default=None, max_length=64)
+    importance: Optional[int] = Field(default=None, ge=1, le=5)
+
+
+class AiKgCharacterUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    attributes: Optional[Dict[str, Any]] = None
+    role: Optional[str] = Field(default=None, max_length=64)
+    faction: Optional[str] = Field(default=None, max_length=120)
+    status: Optional[str] = Field(default=None, max_length=64)
+    importance: Optional[int] = Field(default=None, ge=1, le=5)
+
+
+class AiKgEventCreate(BaseModel):
+    entity_id: Optional[str] = Field(default=None, max_length=64)
+    name: str = Field(..., min_length=1, max_length=200)
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+    importance: Optional[int] = Field(default=None, ge=1, le=5)
+    in_story_time: Optional[str] = Field(default=None, max_length=120)
+
+
+class AiKgEventUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    attributes: Optional[Dict[str, Any]] = None
+    importance: Optional[int] = Field(default=None, ge=1, le=5)
+    in_story_time: Optional[str] = Field(default=None, max_length=120)
+
+
+class AiKgLocationCreate(BaseModel):
+    entity_id: Optional[str] = Field(default=None, max_length=64)
+    name: str = Field(..., min_length=1, max_length=200)
+    location_type: Optional[str] = Field(default=None, max_length=64)
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AiKgLocationUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    location_type: Optional[str] = Field(default=None, max_length=64)
+    attributes: Optional[Dict[str, Any]] = None
+
+
+class AiKgCharacterEventRelationCreate(BaseModel):
+    source_entity_id: str = Field(..., min_length=1, max_length=64)
+    target_entity_id: str = Field(..., min_length=1, max_length=64)
+    relation: str = Field(default="PARTICIPATES_IN", max_length=64)
+    role: Optional[str] = Field(default=None, max_length=64)
+    action: Optional[str] = Field(default=None, max_length=200)
+    properties: Dict[str, Any] = Field(default_factory=dict)
+
+
+# P1-#6: PlotThread 单条 CRUD schema
+class AiPlotThreadCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    thread_id: Optional[str] = Field(default=None, max_length=64)
+    thread_type: str = Field(default="伏笔", max_length=64)
+    status: str = Field(default="open", max_length=32)
+    priority: int = Field(default=3, ge=1, le=5)
+    notes: str = Field(default="", max_length=2000)
+    related_entity_ids: List[str] = Field(default_factory=list)
+
+
+class AiPlotThreadUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    thread_type: Optional[str] = Field(default=None, max_length=64)
+    status: Optional[str] = Field(default=None, max_length=32)
+    priority: Optional[int] = Field(default=None, ge=1, le=5)
+    notes: Optional[str] = Field(default=None, max_length=2000)
+    related_entity_ids: Optional[List[str]] = None
 
 
 # ---------------------------------------------------------------------------

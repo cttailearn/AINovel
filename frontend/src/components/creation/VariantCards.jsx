@@ -1,6 +1,8 @@
 // 三选一: Tab 形式的版本切换
 // 点击 tab 切换预览 (不切换选中), 点 "选此版本" 才真正选中
+// UX-#14: 5 维评分用雷达图展示
 import { useEffect, useState } from 'react';
+import { ScoreRadar } from './ScoreRadar.jsx';
 
 function ScoreRing({ value, compact = false }) {
   if (typeof value !== 'number' || Number.isNaN(value)) {
@@ -147,7 +149,15 @@ export function VariantTabs({
           {active.content || '(空)'}
         </pre>
         {report && Object.keys(report).length > 0 && (
-          <CriticReport report={report} />
+          <div className="creation-variant-critic">
+            {/* UX-#14: 5 维评分雷达图 */}
+            {report.scores && Object.keys(report.scores).length > 0 && (
+              <div className="creation-variant-critic-radar">
+                <ScoreRadar scores={report.scores} size={200} />
+              </div>
+            )}
+            <CriticReport report={report} />
+          </div>
         )}
       </div>
 

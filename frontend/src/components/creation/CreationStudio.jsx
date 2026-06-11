@@ -2,10 +2,11 @@
 // 整体布局: 顶栏 (项目切换 + 流程进度 + 操作) + 三栏 (章节大纲 | 主工作区 | 设定/参考)
 // 全屏高度 100vh, 不需要页面滚动
 // 入口界面: ProjectListView (项目网格) — NotionWorkspace (项目详情)
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client.js';
 import { useToast } from '../Toast/ToastProvider.jsx';
 import { useCreationTask } from '../../state/CreationTaskContext.jsx';
+import { useConfirm } from '../../hooks/ConfirmProvider.jsx';
 import { ProjectForm } from './ProjectForm.jsx';
 import { ProjectIntakeWizard } from './ProjectIntakeWizard.jsx';
 import { ChapterGenerator } from './ChapterGenerator.jsx';
@@ -13,6 +14,8 @@ import { VariantCards } from './VariantCards.jsx';
 import { VariantEditor } from './VariantEditor.jsx';
 import { ProjectKGPreview } from './ProjectKGPreview.jsx';
 import { KGGraphView } from './KGGraphView.jsx';
+import { ResizablePaneDivider, applyStoredPaneWidths } from './ResizablePaneDivider.jsx';
+import { PlotThreadsPanel } from './PlotThreadsPanel.jsx';
 import './creation.css';
 
 // 持久化最近一次打开的项目 ID, 让"刷新页面/重连任务"后能自动回到原项目,
@@ -97,6 +100,7 @@ function formatDateTime(iso) {
 export function CreationStudio({ models = [], topSearch = '' }) {
   const toast = useToast();
   const creationTask = useCreationTask();
+  const confirmDialog = useConfirm();
   const [projects, setProjects] = useState([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
   // 从 localStorage 恢复最近一次打开的项目 — 配合 CreationTaskContext, 刷
@@ -131,6 +135,10 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // UX-#2: 记录上次失败时的参数, 供 retry 复用
+  const [lastAttempt, setLastAttempt] = useState(null);
+  const [chapterGenError, setChapterGenError] = useState(null);
 
   const [kgRefreshKey, setKgRefreshKey] = useState(0);
 
@@ -244,7 +252,13 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     if (!activeProjectId) return;
     const p = projectDetail?.project;
     if (!p) return;
-    if (!confirm(`确认删除项目「${p.title}」? 所有章节 / 变体 / 图谱将一并删除, 不可恢复.`)) return;
+    const ok = await confirmDialog({
+      title: '删除项目',
+      message: `确认删除项目「${p.title}」? 所有章节 / 变体 / 图谱将一并删除, 不可恢复.`,
+      danger: true,
+      confirmText: '确认删除',
+    });
+    if (!ok) return;
     try {
       await api.creation.deleteProject(activeProjectId);
       toast.success('已删除');
@@ -271,7 +285,13 @@ export function CreationStudio({ models = [], topSearch = '' }) {
 
   const handleClearKG = async () => {
     if (!activeProjectId) return;
-    if (!confirm('确认清空本项目的知识图谱? 此操作不可恢复.')) return;
+    const ok = await confirmDialog({
+      title: '清空知识图谱',
+      message: '确认清空本项目的知识图谱? 此操作不可恢复.',
+      danger: true,
+      confirmText: '确认清空',
+    });
+    if (!ok) return;
     try {
       await api.creation.clearKG(activeProjectId);
       toast.success('已清空');
@@ -288,6 +308,9 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   const handleGenerate = useCallback(
     ({ user_intent, title, chapter_no }) => {
       if (!activeProjectId) return;
+      // UX-#2: 记录本次参数, 失败时给 retry 用
+      setLastAttempt({ user_intent, title, chapter_no });
+      setChapterGenError(null);
       creationTask.startGeneration({
         targetProjectId: activeProjectId,
         projectTitle: projectDetail?.project?.title,
@@ -329,6 +352,8 @@ export function CreationStudio({ models = [], topSearch = '' }) {
             } else {
               toast.success('章节生成完成');
             }
+            // UX-#2: 成功后清错
+            setChapterGenError(null);
             await loadProjectDetail(activeProjectId);
             // 让大纲里看到"刚生成的章节"被自动选中, 变体视图立刻出现
             const newChapterId = data.chapter_id;
@@ -339,6 +364,8 @@ export function CreationStudio({ models = [], topSearch = '' }) {
           } else if (ev?.event === 'error' || data.event === 'error') {
             const msg = data.message || '生成失败';
             toast.error(msg);
+            // UX-#2: 失败保留参数 + 错误, 等待重试
+            setChapterGenError(msg);
           }
         },
       });
@@ -408,10 +435,14 @@ export function CreationStudio({ models = [], topSearch = '' }) {
 
   const handleDeleteChapter = async (chapter) => {
     if (!chapter) return;
-    if (!confirm(
-      `确认删除第 ${chapter.chapter_no} 章「${chapter.title || '(未命名)'}」?\n`
-      + `所有变体将被一并删除, 不可恢复.`
-    )) return;
+    const ok = await confirmDialog({
+      title: '删除章节',
+      message: `确认删除第 ${chapter.chapter_no} 章「${chapter.title || '(未命名)'}」?\n`
+        + `所有变体将被一并删除, 不可恢复.`,
+      danger: true,
+      confirmText: '确认删除',
+    });
+    if (!ok) return;
     setDeleting(true);
     try {
       await api.creation.deleteChapter(chapter.id);
@@ -435,6 +466,80 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     setRegenOf(chapter);
     setActiveChapterId(chapter.id);
     setChapterDetail(null);
+  };
+
+  // UX-#9: 批量删除
+  const handleBatchDelete = async (ids) => {
+    if (!ids || ids.length === 0) return;
+    const ok = await confirmDialog({
+      title: '批量删除章节',
+      message: `确认删除选中的 ${ids.length} 个章节? 所有变体将被一并删除, 不可恢复.`,
+      danger: true,
+      confirmText: '确认删除',
+    });
+    if (!ok) return;
+    try {
+      let n = 0;
+      for (const id of ids) {
+        try {
+          await api.creation.deleteChapter(id);
+          n += 1;
+        } catch (e) { /* 单个失败继续 */ }
+      }
+      toast.success(`已删除 ${n} 章`);
+      if (ids.includes(activeChapterId)) {
+        setActiveChapterId(null);
+        setChapterDetail(null);
+      }
+      await loadProjectDetail(activeProjectId);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : '批量删除失败');
+    }
+  };
+
+  // UX-#9: 批量导出
+  const handleBatchExport = (ids) => {
+    if (!ids || ids.length === 0) return;
+    let n = 0;
+    for (const id of ids) {
+      const url = api.creation.exportChapterUrl(id, 'txt');
+      const a = document.createElement('a');
+      a.href = url;
+      a.style.display = 'none';
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => a.remove(), 0);
+      n += 1;
+    }
+    toast.success(`已导出 ${n} 章`);
+  };
+
+  // UX-#6: 拖拽重排
+  const handleReorder = async (newOrder) => {
+    if (!projectDetail || !newOrder) return;
+    // 乐观更新: 立刻在前端看到重排效果
+    const sorted = [...newOrder].sort((a, b) => a.chapter_no - b.chapter_no);
+    const optimistic = {
+      ...projectDetail,
+      chapters: newOrder,
+    };
+    setProjectDetail(optimistic);
+    // 重新给 chapter_no 编号: 第 i 个 = i + 1
+    try {
+      const updates = newOrder.map((ch, idx) => ({
+        id: ch.id,
+        chapter_no: idx + 1,
+      }));
+      // 后端批量更新 endpoint
+      await apiRequest(`/creation/projects/${activeProjectId}/chapters/reorder`, {
+        method: 'POST', body: { orders: updates },
+      });
+      await loadProjectDetail(activeProjectId);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : '重排失败, 已恢复');
+      await loadProjectDetail(activeProjectId);
+    }
   };
 
   // ============================================================
@@ -467,47 +572,50 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     );
   }
 
+  // 在所有分支的 return 之前, 也需要让 dialog 可以挂载
   return (
-    <NotionWorkspace
-      activeProjectId={activeProjectId}
-      onSelectProject={(id) => { setActiveProjectId(id); setRegenOf(null); }}
-      onCreateNew={() => setCreatingProject(true)}
-      onBackToProjects={() => {
-        setActiveProjectId(null);
-        setProjectDetail(null);
-        setActiveChapterId(null);
-        setChapterDetail(null);
-        setRegenOf(null);
-        setEditingProject(false);
-      }}
-      projectDetail={projectDetail}
-      chapterDetail={chapterDetail}
-      chapterLoading={chapterLoading}
-      generating={generating}
-      genProgress={genProgress}
-      saving={saving}
-      confirming={confirming}
-      deleting={deleting}
-      regenOf={regenOf}
-      setRegenOf={setRegenOf}
-      kgRefreshKey={kgRefreshKey}
-      editingProject={editingProject}
-      submittingProject={submittingProject}
-      setEditingProject={setEditingProject}
-      handleUpdateProject={handleUpdateProject}
-      handleDeleteProject={handleDeleteProject}
-      handleSeedKG={handleSeedKG}
-      handleClearKG={handleClearKG}
-      setActiveChapterId={setActiveChapterId}
-      handleGenerate={handleGenerate}
-      handleSelectVariant={handleSelectVariant}
-      handleEditVariant={handleEditVariant}
-      handleSaveContent={handleSaveContent}
-      handleConfirmChapter={handleConfirmChapter}
-      handleExportChapter={handleExportChapter}
-      handleDeleteChapter={handleDeleteChapter}
-      handleRegenerateChapter={handleRegenerateChapter}
-    />
+    <>
+      <NotionWorkspace
+        activeProjectId={activeProjectId}
+        onSelectProject={(id) => { setActiveProjectId(id); setRegenOf(null); }}
+        onCreateNew={() => setCreatingProject(true)}
+        onBackToProjects={() => {
+          setActiveProjectId(null);
+          setProjectDetail(null);
+          setActiveChapterId(null);
+          setChapterDetail(null);
+          setRegenOf(null);
+          setEditingProject(false);
+        }}
+        projectDetail={projectDetail}
+        chapterDetail={chapterDetail}
+        chapterLoading={chapterLoading}
+        generating={generating}
+        genProgress={genProgress}
+        saving={saving}
+        confirming={confirming}
+        deleting={deleting}
+        regenOf={regenOf}
+        setRegenOf={setRegenOf}
+        kgRefreshKey={kgRefreshKey}
+        editingProject={editingProject}
+        submittingProject={submittingProject}
+        setEditingProject={setEditingProject}
+        handleUpdateProject={handleUpdateProject}
+        handleDeleteProject={handleDeleteProject}
+        handleSeedKG={handleSeedKG}
+        handleClearKG={handleClearKG}
+        setActiveChapterId={setActiveChapterId}
+        handleGenerate={handleGenerate}
+        handleSelectVariant={handleSelectVariant}
+        handleEditVariant={handleEditVariant}
+        handleSaveContent={handleSaveContent}
+        handleConfirmChapter={handleConfirmChapter}
+        handleExportChapter={handleExportChapter}
+        handleDeleteChapter={handleDeleteChapter}
+        handleRegenerateChapter={handleRegenerateChapter}
+      />
+    </>
   );
 }
 
@@ -647,6 +755,27 @@ function NotionWorkspace(props) {
   );
 
   const [referenceOpen, setReferenceOpen] = useState(true);
+  // UX-#1: 专注模式 / TOC 折叠状态
+  const [focusMode, setFocusMode] = useState(false);
+  const [tocCollapsed, setTocCollapsed] = useState(false);
+  const workspaceBodyRef = useRef(null);
+
+  // 启动时把分栏宽度从 localStorage 应用到容器
+  useEffect(() => {
+    if (workspaceBodyRef.current) {
+      applyStoredPaneWidths(workspaceBodyRef.current);
+    }
+  }, []);
+
+  // Esc 退出专注模式
+  useEffect(() => {
+    if (!focusMode) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape') setFocusMode(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focusMode]);
 
   return (
     <div className="creation-studio">
@@ -698,20 +827,10 @@ function NotionWorkspace(props) {
               type="button"
               className="btn btn-ghost btn-sm"
               onClick={() => setEditingProject(!editingProject)}
-              title="编辑项目设定"
+              title="编辑项目设定 (保存时自动灌入人物到图谱)"
             >
               ⚙ 设定
             </button>
-            {hasConcepts && (
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                onClick={handleSeedKG}
-                title="把初始人物灌入知识图谱"
-              >
-                📊 灌入
-              </button>
-            )}
             {(kgStats.characters || 0) > 0 && (
               <button
                 type="button"
@@ -723,6 +842,24 @@ function NotionWorkspace(props) {
               </button>
             )}
             <div className="creation-topbar-divider" />
+            <button
+              type="button"
+              className={`btn btn-ghost btn-sm ${tocCollapsed ? '' : 'is-active'}`}
+              onClick={() => setTocCollapsed((v) => !v)}
+              title={tocCollapsed ? '显示左侧大纲' : '隐藏左侧大纲'}
+              aria-label={tocCollapsed ? '显示左侧' : '隐藏左侧'}
+            >
+              {tocCollapsed ? '☰' : '«大纲'}
+            </button>
+            <button
+              type="button"
+              className={`btn btn-ghost btn-sm ${focusMode ? 'is-active' : ''}`}
+              onClick={() => setFocusMode((v) => !v)}
+              title={focusMode ? '退出专注模式' : '进入专注模式 (仅看主工作区)'}
+              aria-label="专注模式"
+            >
+              {focusMode ? '⤢' : '⤡'}
+            </button>
             <button
               type="button"
               className="creation-reference-toggle"
@@ -751,22 +888,38 @@ function NotionWorkspace(props) {
         </header>
 
         <div
+          ref={workspaceBodyRef}
           className={
             'creation-workspace-body creation-workspace-notion-body'
             + (referenceOpen ? '' : ' is-reference-collapsed')
+            + (tocCollapsed ? ' is-toc-collapsed' : '')
+            + (focusMode ? ' is-focus-mode' : '')
           }
         >
-          <ChapterOutlinePane
-            chapters={chapters}
-            activeChapterId={chapterDetail?.id}
-            nextChapterNo={nextChapterNo}
-            generating={generating}
-            onSelectChapter={(ch) => { setActiveChapterId(ch.id); setRegenOf(null); }}
-            onExportChapter={handleExportChapter}
-            onRegenerateChapter={handleRegenerateChapter}
-            onDeleteChapter={handleDeleteChapter}
-            onGenerateNext={() => { setActiveChapterId(null); setRegenOf(null); }}
-          />
+          {!tocCollapsed && !focusMode && (
+            <ChapterOutlinePane
+              chapters={chapters}
+              activeChapterId={chapterDetail?.id}
+              nextChapterNo={nextChapterNo}
+              generating={generating}
+              onSelectChapter={(ch) => { setActiveChapterId(ch.id); setRegenOf(null); }}
+              onExportChapter={handleExportChapter}
+              onRegenerateChapter={handleRegenerateChapter}
+              onDeleteChapter={handleDeleteChapter}
+              onGenerateNext={() => { setActiveChapterId(null); setRegenOf(null); }}
+              onBatchDelete={handleBatchDelete}
+              onBatchExport={handleBatchExport}
+              onReorder={handleReorder}
+            />
+          )}
+
+          {!tocCollapsed && !focusMode && (
+            <ResizablePaneDivider
+              side="toc"
+              containerRef={workspaceBodyRef}
+              cssVarName="--toc-width"
+            />
+          )}
 
           <CanvasPane
             project={project}
@@ -786,32 +939,45 @@ function NotionWorkspace(props) {
             handleExportChapter={handleExportChapter}
             handleDeleteChapter={handleDeleteChapter}
             handleRegenerateChapter={handleRegenerateChapter}
+            focusMode={focusMode}
+            onExitFocusMode={() => setFocusMode(false)}
+            lastAttempt={lastAttempt}
+            chapterGenError={chapterGenError}
           />
 
-          <ReferencePane
-            open={referenceOpen}
-            project={project}
-            kgStats={kgStats}
-            kgRefreshKey={kgRefreshKey}
-            editingProject={editingProject}
-            setEditingProject={setEditingProject}
-            submittingProject={submittingProject}
-            handleUpdateProject={handleUpdateProject}
-            handleSeedKG={handleSeedKG}
-            handleClearKG={handleClearKG}
-            hasConcepts={hasConcepts}
-            onToggle={() => setReferenceOpen((v) => !v)}
-            threads={projectDetail.plot_threads || []}
-            locations={projectDetail.locations || []}
-            themesProgress={projectDetail.themes_progress || []}
-            kgChars={projectDetail.kg_full?.characters || []}
-            kgEvents={projectDetail.kg_full?.events || []}
-            kgLocations={projectDetail.kg_full?.locations || []}
-            kgCharRels={projectDetail.kg_full?.character_relations || []}
-            kgCharEventRels={projectDetail.kg_full?.character_event_relations || []}
-            kgEventRels={projectDetail.kg_full?.event_relations || []}
-            activeChapter={chapterDetail}
-          />
+          {referenceOpen && !focusMode && (
+            <>
+              <ResizablePaneDivider
+                side="reference"
+                containerRef={workspaceBodyRef}
+                cssVarName="--ref-width"
+              />
+              <ReferencePane
+                open={referenceOpen}
+                project={project}
+                kgStats={kgStats}
+                kgRefreshKey={kgRefreshKey}
+                editingProject={editingProject}
+                setEditingProject={setEditingProject}
+                submittingProject={submittingProject}
+                handleUpdateProject={handleUpdateProject}
+                handleSeedKG={handleSeedKG}
+                handleClearKG={handleClearKG}
+                hasConcepts={hasConcepts}
+                onToggle={() => setReferenceOpen((v) => !v)}
+                threads={projectDetail.plot_threads || []}
+                locations={projectDetail.locations || []}
+                themesProgress={projectDetail.themes_progress || []}
+                kgChars={projectDetail.kg_full?.characters || []}
+                kgEvents={projectDetail.kg_full?.events || []}
+                kgLocations={projectDetail.kg_full?.locations || []}
+                kgCharRels={projectDetail.kg_full?.character_relations || []}
+                kgCharEventRels={projectDetail.kg_full?.character_event_relations || []}
+                kgEventRels={projectDetail.kg_full?.event_relations || []}
+                activeChapter={chapterDetail}
+              />
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -873,30 +1039,175 @@ function FlowProgressCompact({ currentStep, generating }) {
 function ChapterOutlinePane({
   chapters, activeChapterId, nextChapterNo, generating,
   onSelectChapter, onExportChapter, onRegenerateChapter, onDeleteChapter,
-  onGenerateNext,
+  onGenerateNext, onBatchDelete, onBatchExport, onReorder,
 }) {
+  // UX-#5: 状态 chip 过滤
+  const [filter, setFilter] = useState('all');
+  // UX-#9: 多选
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  // UX-#6: 拖拽
+  const [dragIdx, setDragIdx] = useState(null);
+  const [overIdx, setOverIdx] = useState(null);
+
+  const filtered = chapters.filter((ch) => {
+    if (filter === 'all') return true;
+    if (filter === 'unconfirmed') {
+      return ch.status !== 'confirmed';
+    }
+    if (filter === 'in_progress') {
+      return ['generating', 'generated', 'selected', 'edited'].includes(ch.status);
+    }
+    return ch.status === filter;
+  });
+  const counts = {
+    all: chapters.length,
+    unconfirmed: chapters.filter((c) => c.status !== 'confirmed').length,
+    in_progress: chapters.filter((c) => ['generating', 'generated', 'selected', 'edited'].includes(c.status)).length,
+    confirmed: chapters.filter((c) => c.status === 'confirmed').length,
+    generating: chapters.filter((c) => c.status === 'generating').length,
+  };
+
+  const toggleSelect = (id) => {
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+  const clearSelection = () => {
+    setSelected(new Set());
+    setSelectMode(false);
+  };
+  const onSelectAllFiltered = () => {
+    setSelected(new Set(filtered.map((c) => c.id)));
+  };
+
+  // 拖拽处理 (HTML5 native)
+  const handleDragStart = (e, idx) => {
+    setDragIdx(idx);
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', String(idx)); } catch { /* noop */ }
+  };
+  const handleDragOver = (e, idx) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (overIdx !== idx) setOverIdx(idx);
+  };
+  const handleDragLeave = (e, idx) => {
+    if (overIdx === idx) setOverIdx(null);
+  };
+  const handleDrop = (e, idx) => {
+    e.preventDefault();
+    if (dragIdx == null || dragIdx === idx) {
+      setDragIdx(null); setOverIdx(null); return;
+    }
+    const reordered = [...chapters];
+    const [moved] = reordered.splice(dragIdx, 1);
+    reordered.splice(idx, 0, moved);
+    onReorder?.(reordered);
+    setDragIdx(null); setOverIdx(null);
+  };
+  const handleDragEnd = () => {
+    setDragIdx(null); setOverIdx(null);
+  };
+
   return (
     <aside className="creation-toc-pane">
       <div className="creation-toc-pane-head">
         <h3>📑 章节大纲</h3>
         <span className="muted small">{chapters.length} 章</span>
       </div>
+      <div className="creation-toc-filter-chips" role="tablist" aria-label="状态过滤">
+        {[
+          ['all', `全部 (${counts.all})`],
+          ['in_progress', `进行中 (${counts.in_progress})`],
+          ['unconfirmed', `待编辑 (${counts.unconfirmed - counts.in_progress})`],
+          ['confirmed', `已确认 (${counts.confirmed})`],
+        ].map(([k, label]) => (
+          <button
+            key={k}
+            type="button"
+            role="tab"
+            aria-selected={filter === k}
+            className={`creation-toc-chip ${filter === k ? 'active' : ''}`}
+            onClick={() => setFilter(k)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* UX-#9: 多选工具栏 */}
+      <div className="creation-toc-toolbar">
+        <button
+          type="button"
+          className={`btn btn-ghost btn-sm ${selectMode ? 'is-active' : ''}`}
+          onClick={() => { setSelectMode(!selectMode); if (selectMode) clearSelection(); }}
+          aria-pressed={selectMode}
+        >
+          ☑ 多选
+        </button>
+        {selectMode && (
+          <>
+            <span className="muted small">已选 {selected.size}</span>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onSelectAllFiltered}>全选</button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={clearSelection}>取消</button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => { onBatchExport?.(Array.from(selected)); }}
+              disabled={selected.size === 0}
+              title="批量导出所选章节"
+            >⤓ 导出</button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm danger"
+              onClick={() => { onBatchDelete?.(Array.from(selected)); clearSelection(); }}
+              disabled={selected.size === 0}
+              title="批量删除所选章节"
+            >🗑 删除</button>
+          </>
+        )}
+      </div>
+
       <div className="creation-toc-pane-body">
         {chapters.length === 0 ? (
           <p className="muted small" style={{ padding: '8px 4px' }}>
             还没有章节, 点击下方按钮开始
           </p>
+        ) : filtered.length === 0 ? (
+          <p className="muted small" style={{ padding: '8px 4px' }}>
+            当前过滤下没有章节
+          </p>
         ) : (
-          chapters.map((ch) => (
-            <ChapterTOCItem
+          filtered.map((ch, idx) => (
+            <div
               key={ch.id}
-              chapter={ch}
-              active={ch.id === activeChapterId}
-              onSelect={() => onSelectChapter(ch)}
-              onExport={() => onExportChapter(ch)}
-              onRegenerate={() => onRegenerateChapter(ch)}
-              onDelete={() => onDeleteChapter(ch)}
-            />
+              draggable={!selectMode && onReorder != null}
+              onDragStart={(e) => handleDragStart(e, idx)}
+              onDragOver={(e) => handleDragOver(e, idx)}
+              onDragLeave={(e) => handleDragLeave(e, idx)}
+              onDrop={(e) => handleDrop(e, idx)}
+              onDragEnd={handleDragEnd}
+              className={
+                'creation-toc-drag-wrap'
+                + (dragIdx === idx ? ' is-dragging' : '')
+                + (overIdx === idx && dragIdx !== idx ? ' is-drop-target' : '')
+              }
+            >
+              <ChapterTOCItem
+                chapter={ch}
+                active={ch.id === activeChapterId}
+                selectMode={selectMode}
+                selected={selected.has(ch.id)}
+                onToggleSelect={() => toggleSelect(ch.id)}
+                onSelect={() => onSelectChapter(ch)}
+                onExport={() => onExportChapter(ch)}
+                onRegenerate={() => onRegenerateChapter(ch)}
+                onDelete={() => onDeleteChapter(ch)}
+              />
+            </div>
           ))
         )}
       </div>
@@ -914,7 +1225,10 @@ function ChapterOutlinePane({
   );
 }
 
-function ChapterTOCItem({ chapter, active, onSelect, onExport, onRegenerate, onDelete }) {
+function ChapterTOCItem({
+  chapter, active, onSelect, onExport, onRegenerate, onDelete,
+  selectMode = false, selected = false, onToggleSelect,
+}) {
   const status = chapter.status;
   const statusBadge = (() => {
     switch (status) {
@@ -926,13 +1240,32 @@ function ChapterTOCItem({ chapter, active, onSelect, onExport, onRegenerate, onD
       default:           return { dot: '·', cls: 'unknown' };
     }
   })();
+  // P1-#8: Compass 警告指示
+  const compassWarns = (chapter.compass_warnings || []).filter(
+    (w) => (w.severity || 'warn') === 'warn'
+  );
+  const compassScore = chapter.compass_score;
+  const hasCompassIssue =
+    (compassWarns.length >= 3)
+    || (typeof compassScore === 'number' && compassScore < 6);
 
   return (
-    <div className={`creation-toc-item ${active ? 'active' : ''}`}>
+    <div className={`creation-toc-item ${active ? 'active' : ''} ${hasCompassIssue ? 'has-compass-issue' : ''} ${selectMode ? 'is-select-mode' : ''} ${selected ? 'is-selected' : ''}`}>
+      {/* UX-#9: 多选 checkbox */}
+      {selectMode && (
+        <label className="creation-toc-checkbox" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggleSelect}
+            aria-label="选中该章节"
+          />
+        </label>
+      )}
       <button
         type="button"
         className="creation-toc-item-main"
-        onClick={onSelect}
+        onClick={selectMode ? onToggleSelect : onSelect}
         title={`第 ${chapter.chapter_no} 章 · ${chapter.title || '(未命名)'}`}
       >
         <span className={`creation-toc-dot status-${statusBadge.cls}`}>
@@ -945,6 +1278,15 @@ function ChapterTOCItem({ chapter, active, onSelect, onExport, onRegenerate, onD
         {chapter.word_count > 0 && (
           <span className="creation-toc-wc muted small">
             {chapter.word_count}字
+          </span>
+        )}
+        {hasCompassIssue && (
+          <span
+            className="creation-toc-compass-dot"
+            title={`CompassAgent 警告: ${compassWarns.length} 个 warn, 评分 ${typeof compassScore === 'number' ? compassScore.toFixed(1) : '?'}/10`}
+            aria-label="偏离度告警"
+          >
+            ⚠
           </span>
         )}
       </button>
@@ -992,6 +1334,10 @@ function CanvasPane({
   handleGenerate, handleSelectVariant, handleEditVariant,
   handleSaveContent, handleConfirmChapter,
   handleExportChapter, handleDeleteChapter, handleRegenerateChapter,
+  focusMode = false,
+  onExitFocusMode,
+  lastAttempt = null,
+  chapterGenError = null,
 }) {
   const nextChapterNo = project.current_chapter_no || 1;
   const isRegen = !!regenOf;
@@ -1011,7 +1357,7 @@ function CanvasPane({
     headHint = 'AI 已自动生成标题, 正在撰写正文…';
   } else {
     headTitle = `生成第 ${nextChapterNo} 章`;
-    headHint = '为下一章提供意图, AI 会自动生成 3 个候选版本';
+    headHint = '为下一章提供意图, AI 自动撰写正文并由 Critic 评分, 不达标会自动重写';
   }
 
   return (
@@ -1022,6 +1368,16 @@ function CanvasPane({
             <h2>{headTitle}</h2>
             <div className="muted small">{headHint}</div>
           </div>
+          {focusMode && onExitFocusMode && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={onExitFocusMode}
+              title="退出专注模式 (Esc)"
+            >
+              ⤢ 退出专注
+            </button>
+          )}
           {(chapterDetail || isRegen) && (() => {
             const targetChapter = chapterDetail || regenOf;
             return (
@@ -1046,6 +1402,9 @@ function CanvasPane({
               progress={genProgress}
               regenMode
               initialTitle={regenOf.title}
+              initialUserIntent={regenOf.user_intent || lastAttempt?.user_intent || ''}
+              lastError={chapterGenError}
+              onRetry={(params) => { handleGenerate(params); setRegenOf(null); }}
               onGenerate={({ user_intent, title, chapter_no }) => {
                 handleGenerate({ user_intent, title, chapter_no });
                 setRegenOf(null);
@@ -1053,13 +1412,17 @@ function CanvasPane({
               onCancelRegen={() => setRegenOf(null)}
             />
           ) : generating ? (
-            <GenerationProgress progress={genProgress} />
+            <GenerationProgress progress={genProgress} startTime={creationTask.startTime} />
           ) : !chapterDetail ? (
             <ChapterGenerator
               project={project}
               nextChapterNo={nextChapterNo}
               generating={generating}
               progress={genProgress}
+              initialUserIntent={lastAttempt?.user_intent || ''}
+              initialTitle={lastAttempt?.title || ''}
+              lastError={chapterGenError}
+              onRetry={handleGenerate}
               onGenerate={handleGenerate}
             />
           ) : chapterLoading ? (
@@ -1157,50 +1520,18 @@ function ReferencePane({
           </section>
         )}
 
-        {/* ⑤ 剧情线索 */}
-        {threads.length > 0 && (
-          <section className="creation-reference-section">
-            <h4>
-              <span>剧情线索</span>
-              <span className="badge">{openThreads.length} 未结 / {threads.length} 总</span>
-            </h4>
-            <ul className="creation-thread-list">
-              {openThreads.map((t, i) => (
-                <li key={`o-${i}`} className="creation-thread-item">
-                  <div className="creation-thread-item-head">
-                    <span className="creation-thread-item-title" title={t.title}>
-                      {t.title}
-                    </span>
-                    <span className={`creation-thread-status status-${t.status}`}>
-                      {t.status}
-                    </span>
-                  </div>
-                  <div className="creation-thread-item-head">
-                    <span className="creation-thread-priority" title={`优先级 ${t.priority}/5`}>
-                      {[1, 2, 3, 4, 5].map((n) => (
-                        <span
-                          key={n}
-                          className={`creation-thread-priority-dot ${
-                            n <= (t.priority || 0) ? 'is-filled' : ''
-                          }`}
-                        />
-                      ))}
-                    </span>
-                    {t.thread_type && (
-                      <span className="muted small">{t.thread_type}</span>
-                    )}
-                  </div>
-                  {t.notes && <p className="creation-thread-notes">{t.notes}</p>}
-                </li>
-              ))}
-              {resolvedThreads.length > 0 && (
-                <li className="muted small" style={{ marginTop: 4 }}>
-                  已回收/放弃 {resolvedThreads.length} 条 (折叠)
-                </li>
-              )}
-            </ul>
-          </section>
-        )}
+        {/* ⑤ 剧情线索 - P1-#6 用 PlotThreadsPanel 提供完整 CRUD */}
+        <section className="creation-reference-section">
+          <h4>
+            <span>剧情线索</span>
+            <span className="badge">{openThreads.length} 未结 / {threads.length} 总</span>
+          </h4>
+          <PlotThreadsPanel
+            projectId={project.id}
+            refreshKey={kgRefreshKey}
+            onChange={() => { setKgRefreshKey((k) => k + 1); loadProjectDetail(project.id); }}
+          />
+        </section>
 
         {/* ④ 地点 */}
         {locations.length > 0 && (
@@ -1276,7 +1607,14 @@ function ReferencePane({
               {kgStats.characters || 0} 人物 / {kgStats.events || 0} 事件
             </span>
           </h4>
-          <ProjectKGPreview projectId={project.id} refreshKey={kgRefreshKey} />
+          <ProjectKGPreview
+            projectId={project.id}
+            refreshKey={kgRefreshKey}
+            onChange={() => {
+              setKgRefreshKey((k) => k + 1);
+              loadProjectDetail(project.id);
+            }}
+          />
         </section>
 
         {/* 项目设定 — 默认折叠, 放在最末, 不挤 KG */}
@@ -1396,7 +1734,23 @@ function ChapterActions({ chapter, generating, onExport, onRegenerate, onDelete 
 // ============================================================
 // 进度展示 + 已确认视图
 // ============================================================
-function GenerationProgress({ progress }) {
+function GenerationProgress({ progress, startTime }) {
+  // UX-#12: 实时显示耗时
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(t);
+  }, []);
+  const elapsedSec = startTime
+    ? Math.max(0, Math.floor((now - startTime) / 1000))
+    : null;
+  const fmtElapsed = (s) => {
+    if (s == null) return '';
+    const mm = Math.floor(s / 60);
+    const ss = String(s % 60).padStart(2, '0');
+    return `${mm}:${ss}`;
+  };
+
   if (!progress) {
     return <p className="muted small">准备生成…</p>;
   }
@@ -1407,10 +1761,21 @@ function GenerationProgress({ progress }) {
   const threshold = progress.score_threshold;
   return (
     <div className="creation-generation-progress">
-      <h4>
-        {isSingle ? '单候选生成' : '生成中'}: {stage}
-        {progress.attempt ? ` · 第 ${progress.attempt} / ${progress.max_attempts || progress.max_revise + 1 || '?'} 轮` : ''}
-      </h4>
+      <div className="creation-progress-header">
+        <h4 style={{ margin: 0, display: 'inline-block' }}>
+          {isSingle ? '单候选生成' : '生成中'}: {stage}
+          {progress.attempt ? ` · 第 ${progress.attempt} / ${progress.max_attempts || progress.max_revise + 1 || '?'} 轮` : ''}
+        </h4>
+        {elapsedSec != null && (
+          <span
+            className="creation-progress-elapsed muted small"
+            title="自本次生成开始已耗时"
+            style={{ marginLeft: 12 }}
+          >
+            ⏱ {fmtElapsed(elapsedSec)}
+          </span>
+        )}
+      </div>
       {isSingle && typeof threshold === 'number' && (
         <div className="muted small">
           Critic 通过阈值: ≥ {threshold.toFixed(1)}/10

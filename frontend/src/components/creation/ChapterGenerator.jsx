@@ -1,5 +1,6 @@
 // 单章节生成: 用户输入意图 → SSE 推送 Planner / Writer / Critic 进度
 // 支持 regenMode: 预填标题, 显示"重新生成第 N 章", 提供取消按钮
+// UX-#2: 失败时支持 retry, lastError + onRetry 由父级传入
 import { useEffect, useState } from 'react';
 
 const STAGE_LABELS = {
@@ -33,18 +34,30 @@ export function ChapterGenerator({
   progress = null,
   regenMode = false,
   initialTitle = '',
+  initialUserIntent = '',
+  lastError = null,
+  onRetry = null,
 }) {
-  const [userIntent, setUserIntent] = useState('');
+  const [userIntent, setUserIntent] = useState(initialUserIntent || '');
   const [title, setTitle] = useState(initialTitle || '');
 
   // regenMode 切换时, 重置 title 为 initialTitle
   useEffect(() => {
     if (regenMode) {
       setTitle(initialTitle || '');
-    } else {
+    } else if (!initialTitle) {
       setTitle('');
+    } else {
+      setTitle(initialTitle);
     }
   }, [regenMode, initialTitle]);
+
+  // P1-#9: regen 模式预填 user_intent
+  useEffect(() => {
+    if (regenMode && initialUserIntent) {
+      setUserIntent(initialUserIntent);
+    }
+  }, [regenMode, initialUserIntent]);
 
   if (!project) return null;
 
@@ -56,9 +69,44 @@ export function ChapterGenerator({
     <div className="creation-generator">
       {!generating ? (
         <div className="creation-generator-form">
+          {/* UX-#2: 上次失败提示 + 重试按钮 */}
+          {lastError && !generating && (
+            <div className="creation-retry-banner">
+              <div className="creation-retry-banner-msg">
+                <strong>上次生成失败</strong>: {lastError}
+              </div>
+              {onRetry && (
+                <div className="creation-retry-banner-actions">
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => onRetry({
+                      user_intent: userIntent.trim() || initialUserIntent,
+                      title: title.trim() || initialTitle,
+                      chapter_no: nextChapterNo,
+                    })}
+                  >
+                    ↻ 用当前参数重试
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => onRetry({
+                      user_intent: userIntent.trim() || initialUserIntent,
+                      title: title.trim() || initialTitle,
+                      chapter_no: nextChapterNo,
+                    }, { useLastParams: true })}
+                    title="用上次失败时的原始参数重试, 不读取当前输入框"
+                  >
+                    ↻ 用上次参数重试
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {regenMode && (
             <div className="creation-regen-hint small">
-              重新生成会覆盖当前章节的所有变体. 你可以填入新的需求(可选)或留空沿用.
+              重新生成会覆盖当前章节正文. 你可以填入新的需求(可选)或留空沿用, AI 会自动评分, 不达标会重写.
             </div>
           )}
           <div className="form-row">
@@ -120,35 +168,66 @@ export function ChapterGenerator({
       ) : (
         <div className="creation-generator-progress">
           <div className="creation-stage-list">
-            {[
-              ['start', '初始化'],
-              ['planner_done', '决策 Agent (Planner) · 3 个方向'],
-              ['writer_0_done', '执行 Agent 1 · 动作方向'],
-              ['writer_1_done', '执行 Agent 2 · 心理方向'],
-              ['writer_2_done', '执行 Agent 3 · 意外方向'],
-              ['critic_0_done', '审核 Agent 1'],
-              ['critic_1_done', '审核 Agent 2'],
-              ['critic_2_done', '审核 Agent 3'],
-              ['done', '完成'],
-            ].map(([key, label]) => {
-              const stages = ['start', 'planner_done',
-                              'writer_0_done', 'writer_1_done', 'writer_2_done',
-                              'critic_0_done', 'critic_1_done', 'critic_2_done', 'done'];
-              const cur = progress?.stage;
-              const curIdx = stages.indexOf(cur);
-              const thisIdx = stages.indexOf(key);
-              const state = curIdx < 0 ? 'todo'
-                : thisIdx < curIdx ? 'done'
-                : thisIdx === curIdx ? 'active' : 'todo';
-              return (
-                <div key={key} className={`creation-stage stage-${state}`}>
-                  <span className="creation-stage-mark">
-                    {state === 'done' ? '✓' : state === 'active' ? '●' : '○'}
-                  </span>
-                  <span>{label}</span>
-                </div>
-              );
-            })}
+            {(() => {
+              // P0-#1: 阶段名根据 mode 动态生成
+              // single 模式: planner → writer → critic → done, 单条流水线
+              // candidates 模式: 3 候选并行, 共 9 步
+              const isSingle = progress?.mode === 'single'
+                || (progress?.directions?.length || 0) <= 1;
+              if (isSingle) {
+                const stages = [
+                  ['start', '初始化'],
+                  ['planner_done', '决策 Agent (Planner)'],
+                  ['writer_0_done', '撰写 Agent (Writer)'],
+                  ['critic_0_done', '审核 Agent (Critic)'],
+                  ['done', '完成'],
+                ];
+                return stages.map(([key, label]) => {
+                  const cur = progress?.stage;
+                  const curIdx = stages.findIndex(([k]) => k === cur);
+                  const thisIdx = stages.findIndex(([k]) => k === key);
+                  const state = curIdx < 0 ? 'todo'
+                    : thisIdx < curIdx ? 'done'
+                    : thisIdx === curIdx ? 'active' : 'todo';
+                  return (
+                    <div key={key} className={`creation-stage stage-${state}`}>
+                      <span className="creation-stage-mark">
+                        {state === 'done' ? '✓' : state === 'active' ? '●' : '○'}
+                      </span>
+                      <span>{label}</span>
+                    </div>
+                  );
+                });
+              }
+              // candidates 模式: 保留旧的 9 步
+              const stages = [
+                ['start', '初始化'],
+                ['planner_done', '决策 Agent (Planner) · 3 个方向'],
+                ['writer_0_done', '执行 Agent 1 · 动作方向'],
+                ['writer_1_done', '执行 Agent 2 · 心理方向'],
+                ['writer_2_done', '执行 Agent 3 · 意外方向'],
+                ['critic_0_done', '审核 Agent 1'],
+                ['critic_1_done', '审核 Agent 2'],
+                ['critic_2_done', '审核 Agent 3'],
+                ['done', '完成'],
+              ];
+              return stages.map(([key, label]) => {
+                const cur = progress?.stage;
+                const curIdx = stages.findIndex(([k]) => k === cur);
+                const thisIdx = stages.findIndex(([k]) => k === key);
+                const state = curIdx < 0 ? 'todo'
+                  : thisIdx < curIdx ? 'done'
+                  : thisIdx === curIdx ? 'active' : 'todo';
+                return (
+                  <div key={key} className={`creation-stage stage-${state}`}>
+                    <span className="creation-stage-mark">
+                      {state === 'done' ? '✓' : state === 'active' ? '●' : '○'}
+                    </span>
+                    <span>{label}</span>
+                  </div>
+                );
+              });
+            })()}
           </div>
 
           {progress?.directions && (

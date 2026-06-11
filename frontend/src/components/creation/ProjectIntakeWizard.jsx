@@ -3,8 +3,40 @@
 // 后续每题: 由 LLM 基于历史动态生成 4~8 个选项
 // 界面: 固定高度轮播; 顶部页码 1·2·3·4 + 「够了, 开始生成」; 左右滑动 / 点击页码 / 键盘 ←→ 切换
 // 每个选项可点选, 也可在「其它」中输入自定义内容
+// UX-#4: slides/draft/settings 持久化到 sessionStorage, 中途关闭/刷新可恢复
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client.js';
+
+// UX-#4: wizard 中途状态持久化
+const WIZARD_STORAGE_KEY = 'ainovel.creation.intake.wizard.v1';
+
+function readWizardStorage() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(WIZARD_STORAGE_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object') return null;
+    return obj;
+  } catch {
+    return null;
+  }
+}
+
+function writeWizardStorage(snapshot) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (snapshot == null) {
+      window.sessionStorage.removeItem(WIZARD_STORAGE_KEY);
+    } else {
+      window.sessionStorage.setItem(WIZARD_STORAGE_KEY, JSON.stringify(snapshot));
+    }
+  } catch { /* noop */ }
+}
+
+function clearWizardStorage() {
+  writeWizardStorage(null);
+}
 
 // ---------- 常量 ----------
 // 种子题: 让首屏立即可见, 不阻塞 LLM
@@ -21,7 +53,7 @@ const SEED_QUESTION = {
 };
 
 const CUSTOM_MARKER = '__custom__';
-const AI_DECIDE = '由 AI 决定';
+const AI_DECIDE = '🤖 AI 决定';
 
 // 高级设置: 范围 / 步长 / 默认值
 const TEMP_MIN = 0;
@@ -33,8 +65,8 @@ const MAX_TOKENS_MAX = 8000;
 const MAX_TOKENS_STEP = 64;
 const MAX_TOKENS_DEFAULT = 1500;
 
-// 轮播固定高度
-const CAROUSEL_HEIGHT = 540;
+// 轮播固定高度 (UX-#7: 改为 min-height, 内容多时自动撑高)
+const CAROUSEL_MIN_HEIGHT = 540;
 // 程序化滚动时, 屏蔽 onScroll 触发的回写 (避免循环)
 const SCROLL_LOCK_MS = 500;
 
@@ -92,8 +124,8 @@ function SettingsPanel({ models = [], settings, onChange, disabled = false }) {
       <summary>
         <span className="intake-settings-icon">⚙</span>
         <span>高级设置</span>
-        <span className="intake-settings-status muted small">
-          {dirty ? '已自定义' : '使用默认'}
+        <span className={`intake-settings-status muted small ${dirty ? 'is-dirty' : ''}`}>
+          {dirty ? '● 已自定义' : '使用默认'}
         </span>
       </summary>
       <div className="intake-settings-body">
@@ -582,18 +614,69 @@ export function ProjectIntakeWizard({
   submitting = false,
 }) {
   // slides: [{ spec, answer }]; 0 = 种子题; N+1 由 /next 动态追加
-  const [slides, setSlides] = useState([]);
-  const [currentIdx, setCurrentIdx] = useState(0);
+  // UX-#4: 启动时优先从 sessionStorage 恢复
+  const restoredRef = useRef(false);
+  const initial = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    return readWizardStorage();
+  }, []);
+  const [slides, setSlides] = useState(
+    (initial && Array.isArray(initial.slides) && initial.slides.length > 0)
+      ? initial.slides
+      : []
+  );
+  const [currentIdx, setCurrentIdx] = useState(
+    (initial && Number.isInteger(initial.currentIdx)) ? initial.currentIdx : 0
+  );
   const [loadingNext, setLoadingNext] = useState(false);
-  const [phase, setPhase] = useState('starting'); // starting|asking|fetching|synthesizing|preview|error
-  const [draft, setDraft] = useState(null);
-  const [errorMsg, setErrorMsg] = useState('');
+  const [phase, setPhase] = useState(
+    (initial && initial.phase && initial.slides && initial.slides.length > 0)
+      ? initial.phase
+      : 'starting'
+  ); // starting|asking|fetching|synthesizing|preview|error
+  const [draft, setDraft] = useState(
+    (initial && initial.draft) ? initial.draft : null
+  );
+  const [errorMsg, setErrorMsg] = useState(
+    (initial && initial.errorMsg) ? initial.errorMsg : ''
+  );
   const [regenerating, setRegenerating] = useState(false);
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState(
+    (initial && initial.settings) ? { ...DEFAULT_SETTINGS, ...initial.settings } : DEFAULT_SETTINGS
+  );
 
   const trackRef = useRef(null);
   const scrollLockRef = useRef(false);
   const scrollLockTimerRef = useRef(null);
+
+  // UX-#4: 每次状态变化都把 wizard 进度写到 sessionStorage
+  useEffect(() => {
+    if (phase === 'starting' && slides.length === 0) return; // 初始态不写
+    writeWizardStorage({
+      slides,
+      currentIdx,
+      phase,
+      draft,
+      errorMsg,
+      settings,
+    });
+  }, [slides, currentIdx, phase, draft, errorMsg, settings]);
+
+  // UX-#4: 离开页面前提示 (只要 wizard 未完成, 即 phase !== 'preview' 且 draft 为空)
+  useEffect(() => {
+    const unfinished =
+      slides.length > 0
+      && phase !== 'preview'  // preview 阶段视为"用户已确定草稿"
+      && !submitting;
+    if (!unfinished) return undefined;
+    const onBeforeUnload = (e) => {
+      e.preventDefault();
+      e.returnValue = '';
+      return '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [slides.length, phase, submitting]);
 
   // 高级设置 → API 覆盖字段
   const buildIntakeOverrides = () => {
@@ -617,14 +700,22 @@ export function ProjectIntakeWizard({
     is_seed: !!s.spec.is_seed,
   }));
 
-  // 初始化: 第一题为种子题
+  // 初始化: 第一题为种子题 (UX-#4: 如果 sessionStorage 已有数据, 则跳过重置)
   useEffect(() => {
-    setSlides([{
-      spec: { ...SEED_QUESTION, is_seed: true },
-      answer: { choice: null, custom_text: '' },
-    }]);
-    setCurrentIdx(0);
-    setPhase('asking');
+    if (restoredRef.current) return;
+    if (slides.length === 0) {
+      setSlides([{
+        spec: { ...SEED_QUESTION, is_seed: true },
+        answer: { choice: null, custom_text: '' },
+      }]);
+      setCurrentIdx(0);
+      setPhase('asking');
+    } else {
+      // 已有 restored slides, 跳过 init, 但需要确认 phase
+      if (phase === 'starting') setPhase('asking');
+    }
+    restoredRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // currentIdx 变化 → 程序化滚动到对应 slide
@@ -657,7 +748,7 @@ export function ProjectIntakeWizard({
     }
   };
 
-  // 键盘 ←→ 切换 (在非输入控件聚焦时)
+  // 键盘 ←→ 切换 (在非输入控件聚焦时) + Ctrl+Enter 触发 finishEarly
   useEffect(() => {
     const onKey = (e) => {
       if (phase !== 'asking' && phase !== 'fetching') return;
@@ -669,11 +760,19 @@ export function ProjectIntakeWizard({
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         if (currentIdx < slides.length - 1) setCurrentIdx(currentIdx + 1);
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'Enter')) {
+        // P2: Ctrl+Enter 触发"够了, 开始生成"
+        e.preventDefault();
+        if (slides.length > 0 && !loadingNext) {
+          const hist = buildHistory(slides);
+          runSynthesize(hist);
+        }
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, currentIdx, slides.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, currentIdx, slides.length, loadingNext]);
 
   // 当前 slide 的回答变更
   const handleAnswerChange = (val) => {
@@ -774,6 +873,8 @@ export function ProjectIntakeWizard({
 
   const handleConfirmCreate = () => {
     if (!draft) return;
+    // UX-#4: 成功提交后清掉 sessionStorage, 避免下次进入遗留旧 wizard
+    clearWizardStorage();
     onSubmit({
       title: (draft.title || '').trim(),
       genre: draft.genre || '',
@@ -783,6 +884,23 @@ export function ProjectIntakeWizard({
       style_pref: draft.style_pref || {},
       model_id: draft.model_id ?? null,
     });
+  };
+
+  // UX-#4: 重新开始 (清掉 sessionStorage + 重置所有状态)
+  const handleRestart = async () => {
+    const ok = window.confirm
+      ? window.confirm('确认清空当前所有问答记录, 重新开始?')
+      : true;
+    if (!ok) return;
+    clearWizardStorage();
+    setSlides([{
+      spec: { ...SEED_QUESTION, is_seed: true },
+      answer: { choice: null, custom_text: '' },
+    }]);
+    setCurrentIdx(0);
+    setPhase('asking');
+    setDraft(null);
+    setErrorMsg('');
   };
 
   // 已答数 (用于页码小圆点的状态展示)
@@ -813,7 +931,7 @@ export function ProjectIntakeWizard({
       {(phase === 'asking' || phase === 'fetching') && (
         <div
           className="intake-carousel"
-          style={{ height: CAROUSEL_HEIGHT }}
+          style={{ minHeight: CAROUSEL_MIN_HEIGHT }}
         >
           {/* 顶部: 页码 + 结束按钮 */}
           <div className="intake-pages">
@@ -843,6 +961,15 @@ export function ProjectIntakeWizard({
               </span>
             )}
             <div className="intake-pages-spacer" />
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={handleRestart}
+              disabled={loadingNext}
+              title="UX-#4: 清空当前问答记录, 重新开始 (sessionStorage 也会清掉)"
+            >
+              ↺ 重新开始
+            </button>
             <button
               type="button"
               className="btn btn-primary btn-sm"
@@ -990,6 +1117,11 @@ export function ProjectIntakeWizard({
 
       <div className="intake-wizard-foot muted small">
         AI 引导式问答 · 已加载 {slides.length} 题 · 滑动 / 点击页码 / ← → 切换
+        {initial && initial.slides && initial.slides.length > 0 && (
+          <> · <span style={{ color: 'var(--accent-color, #6366f1)' }}>
+            ✨ 已从上次进度恢复
+          </span></>
+        )}
       </div>
     </div>
   );

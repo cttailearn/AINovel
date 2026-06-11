@@ -9,6 +9,8 @@ import { EnrichmentTaskBanner } from './components/EnrichmentTaskBanner.jsx';
 import { EnrichmentTaskProvider, useEnrichmentTask } from './state/EnrichmentTaskContext.jsx';
 import { CreationTaskProvider } from './state/CreationTaskContext.jsx';
 import { CreationStudio } from './components/creation/CreationStudio.jsx';
+import { ConfirmProvider } from './hooks/ConfirmProvider.jsx';
+import { ConnectionProvider, useConnection } from './state/ConnectionContext.jsx';
 import { useTheme } from './ThemeContext.jsx';
 import './App.css';
 
@@ -122,7 +124,11 @@ export default function App() {
   return (
     <EnrichmentTaskProvider>
       <CreationTaskProvider>
-        <AppShell />
+        <ConnectionProvider>
+          <ConfirmProvider>
+            <AppShell />
+          </ConfirmProvider>
+        </ConnectionProvider>
       </CreationTaskProvider>
     </EnrichmentTaskProvider>
   );
@@ -132,6 +138,7 @@ function AppShell() {
   const { theme, toggleTheme } = useTheme();
   const toast = useToast();
   const { reset: resetEnrichmentTask } = useEnrichmentTask();
+  const conn = useConnection();
   const [activeNav, setActiveNav] = useState('workbench');
   const [settingsTab, setSettingsTab] = useState('models');
   const [models, setModels] = useState([]);
@@ -226,6 +233,32 @@ function AppShell() {
       </aside>
 
       <main className="rail-main">
+        {/* UX-#10: 后端断开全局 banner + 写操作拦截 */}
+        {conn.status === 'error' && (
+          <div className="connection-error-banner" role="alert">
+            <span className="connection-error-banner-icon">⚠</span>
+            <span className="connection-error-banner-msg">
+              <strong>后端连接已断开</strong>
+              {conn.retryIn > 0 && <> · {conn.retryIn}s 后自动重试</>}
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => conn.check()}
+              title="立即重试连接"
+            >
+              ↻ 重试
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => conn.ignoreOnce()}
+              title="本会话忽略, 写操作会因连接失败而报错"
+            >
+              忽略
+            </button>
+          </div>
+        )}
         <header className="rail-topbar">
           <div className="rail-topbar-title">
             <h1>{meta.title}</h1>
@@ -272,7 +305,7 @@ function AppShell() {
           </div>
         </header>
 
-        <section className="rail-body">
+        <section className={`rail-body${activeNav === 'creation' ? ' rail-body-creation' : ''}`}>
           {activeNav === 'workbench' ? (
             <Workbench
               models={models}

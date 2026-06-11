@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -32,6 +33,41 @@ from services.task_registry import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
+
+# UX-#11: 任务快照镜像 (跨设备 / 跨重装不丢)
+# - 进程内 K-V, 最多保留 256 条; 旧条目自动驱逐
+_MIRROR_MAX = 256
+_MIRROR: Dict[str, Dict[str, Any]] = {}
+
+
+def _prune_mirror() -> None:
+    if len(_MIRROR) <= _MIRROR_MAX:
+        return
+    by_ts = sorted(_MIRROR.items(), key=lambda kv: kv[1].get("ts", 0))
+    for key, _ in by_ts[: len(_MIRROR) - _MIRROR_MAX]:
+        _MIRROR.pop(key, None)
+
+
+@router.put("/mirror/{client_id}")
+async def put_mirror(client_id: str, payload: Dict[str, Any]):
+    """前端推送最近一次任务快照. 失败/重连时优先读这个, 而非 localStorage."""
+    key = f"client:{client_id}"
+    _MIRROR[key] = {
+        "ts": time.time(),
+        "snapshot": payload,
+    }
+    _prune_mirror()
+    return {"ok": True, "ts": _MIRROR[key]["ts"]}
+
+
+@router.get("/mirror/{client_id}")
+async def get_mirror(client_id: str):
+    """读取最近一次推送的任务快照. 没推送过返回 404."""
+    key = f"client:{client_id}"
+    rec = _MIRROR.get(key)
+    if not rec:
+        raise HTTPException(status_code=404, detail="尚未镜像")
+    return {"snapshot": rec["snapshot"], "ts": rec["ts"]}
 
 
 def _sse_format(event: str, data: Any) -> bytes:

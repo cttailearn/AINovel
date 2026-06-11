@@ -3454,7 +3454,30 @@ input:checked + .slider:before {
   color: var(--primary);
 }
 
-/* === ���������ؿ� === */
+/* === 全局后端断开 banner (UX-#10) === */
+.connection-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--danger-bg, #fef2f2);
+  border-bottom: 1px solid var(--danger-color, #f87171);
+  color: var(--danger-text, #991b1b);
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+.connection-error-banner-icon {
+  font-size: 16px;
+  animation: intake-dot-pulse 1.5s ease-in-out infinite;
+}
+.connection-error-banner-msg {
+  flex: 1;
+}
+.connection-error-banner-msg strong {
+  font-weight: 600;
+}
+
+/* === 加载区块 === */
 .loading-block {
   display: flex;
   flex-direction: column;
@@ -4759,6 +4782,15 @@ input:checked + .slider:before {
   max-width: 1280px;
   width: 100%;
   margin: 0 auto;
+}
+
+/* AI 创作工作区使用满宽(去除 max-width 限制 + 减少水平 padding),
+   让红框内的工作区占满左侧栏右侧所有可用空间. */
+.rail-body.rail-body-creation {
+  max-width: none;
+  width: 100%;
+  padding: 0;
+  margin: 0;
 }
 
 .settings-page {

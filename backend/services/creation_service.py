@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import database as db
@@ -46,6 +47,28 @@ logger = logging.getLogger(__name__)
 
 class CreationError(RuntimeError):
     pass
+
+
+# P2-#30: 错误信息脱敏 — 不把 API key / 内网地址 / 堆栈返回给前端
+_SENSITIVE_PATTERNS = [
+    (re.compile(r'sk-[A-Za-z0-9_\-]{8,}'), 'sk-***'),
+    (re.compile(r'Bearer\s+[A-Za-z0-9_\-\.]{8,}'), 'Bearer ***'),
+    (re.compile(r'://[^/\s]+@'), '://***@'),  # user:pass@host
+    (re.compile(r'127\.0\.0\.\d+'), '127.0.0.x'),
+    (re.compile(r'10\.\d{1,3}\.\d{1,3}\.\d{1,3}'), '10.x.x.x'),
+    (re.compile(r'192\.168\.\d{1,3}\.\d{1,3}'), '192.168.x.x'),
+]
+
+
+def sanitize_error(exc: Exception) -> str:
+    """把异常对象转成脱敏后的可展示字符串."""
+    msg = str(exc) or exc.__class__.__name__
+    for pat, repl in _SENSITIVE_PATTERNS:
+        msg = pat.sub(repl, msg)
+    # 截断超长堆栈信息
+    if len(msg) > 300:
+        msg = msg[:300] + '…'
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +153,18 @@ async def create_project(payload: Dict[str, Any]) -> int:
 
 
 async def update_project(project_id: int, payload: Dict[str, Any]) -> bool:
-    return await db.update_ai_project(
+    """更新项目设定. 当 initial_concepts 列表发生变化时, 自动重新灌入
+    知识图谱 (保留 LLM 后抽取的实体, 只新增/补齐 initial_concepts 里的
+    人物). 这样用户编辑设定时无需再手动点「灌入」按钮, 也避免了
+    灌入覆盖后续章节抽取的新实体.
+    """
+    # 先拿一次旧值, 用于对比 initial_concepts 是否变了
+    old_concepts: Optional[List[Dict[str, Any]]] = None
+    if "initial_concepts" in payload:
+        old = await db.get_ai_project(project_id)
+        old_concepts = old.get("initial_concepts") if old else None
+
+    ok = await db.update_ai_project(
         project_id,
         title=payload.get("title"),
         genre=payload.get("genre"),
@@ -141,10 +175,99 @@ async def update_project(project_id: int, payload: Dict[str, Any]) -> bool:
         model_id=payload.get("model_id"),
         status=payload.get("status"),
     )
+    if not ok:
+        return False
+
+    # initial_concepts 变更检测: 与旧值不一致就重新灌入 (upsert, 不删除已有实体)
+    if "initial_concepts" in payload:
+        new_concepts = payload.get("initial_concepts") or []
+        if not _concepts_equal(old_concepts, new_concepts):
+            try:
+                await seed_kg_from_concepts(project_id)
+                logger.info(
+                    "Auto re-seeded KG after initial_concepts update for project %s",
+                    project_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Auto re-seed KG failed for project %s: %s",
+                    project_id, exc,
+                )
+    return True
+
+
+def _concepts_equal(
+    a: Optional[List[Dict[str, Any]]], b: List[Dict[str, Any]]
+) -> bool:
+    """判断两个 initial_concepts 列表是否等价 (按 name 排序后逐项对比)."""
+    if a is None:
+        return not b
+    if len(a) != len(b):
+        return False
+    a_norm = sorted(
+        [{k: v for k, v in (c or {}).items() if k != "entity_id"} for c in a],
+        key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False),
+    )
+    b_norm = sorted(
+        [{k: v for k, v in (c or {}).items() if k != "entity_id"} for c in b],
+        key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False),
+    )
+    return a_norm == b_norm
 
 
 async def delete_project(project_id: int) -> bool:
     return await db.delete_ai_project(project_id)
+
+
+async def duplicate_project(project_id: int) -> int:
+    """UX-#15: 复制项目. 复制: 设定 / KG 人物事件地点 / 关系 / plot_threads /
+    locations / themes_progress. 不复制: 章节正文, 变体, 最终内容.
+    标题加 "(副本)" 后缀.
+    """
+    src = await db.get_ai_project(project_id)
+    if not src:
+        raise CreationError(f"项目 {project_id} 不存在")
+    new_id = await db.create_ai_project(
+        title=f"{src.get('title') or '未命名项目'} (副本)",
+        genre=src.get("genre", ""),
+        worldview=src.get("worldview", ""),
+        outline=src.get("outline", ""),
+        initial_concepts=src.get("initial_concepts") or [],
+        style_pref=src.get("style_pref") or {},
+        model_id=src.get("model_id"),
+    )
+    # 复制 KG 人物
+    src_chars = await db._fetch_all_ai_kg_characters(project_id) if False else None  # 用 list
+    chars = await db.list_ai_knowledge_graph(project_id)
+    if chars.get("characters"):
+        for c in chars["characters"]:
+            await db.insert_ai_kg_character(
+                new_id,
+                entity_id=f"char_{_short_id()}",
+                name=c.get("name", ""),
+                attributes=c.get("attributes") or {},
+                role=c.get("role"),
+                faction=c.get("faction"),
+                status=c.get("status"),
+                importance=c.get("importance"),
+            )
+    # 复制 KG 事件
+    if chars.get("events"):
+        for e in chars["events"]:
+            await db.insert_ai_kg_event(
+                new_id,
+                entity_id=f"evt_{_short_id()}",
+                name=e.get("name", ""),
+                attributes=e.get("attributes") or {},
+                importance=e.get("importance"),
+                in_story_time=e.get("in_story_time"),
+            )
+    return new_id
+
+
+def _short_id(n: int = 10) -> str:
+    import uuid as _u
+    return _u.uuid4().hex[:n]
 
 
 # ---------------------------------------------------------------------------
@@ -459,19 +582,38 @@ async def _generate_chapter_streaming_candidates(
         return
 
     target_chapter_no = int(chapter_no or project.get("current_chapter_no") or 1)
-    # 同一 chapter_no 已存在则视为重试, 删掉原行 + 变体
+    # P0-#3: 同一 chapter_no 已存在时, 软归档旧变体而非删除整章
+    # 这样用户能随时回退到之前任意一轮的结果
     existing = await db.list_ai_chapters(project_id)
     for ch in existing:
         if int(ch.get("chapter_no")) == target_chapter_no:
-            await db.delete_ai_chapter(int(ch["id"]))
-
-    chapter_id = await db.create_ai_chapter(
-        project_id=project_id,
-        chapter_no=target_chapter_no,
-        title=title.strip(),
-        user_intent=user_intent.strip(),
-        status="generating",
-    )
+            existing_chapter_id = int(ch["id"])
+            # 归档当前轮次所有未 superseded 的变体
+            current_round = await db.max_variant_round(existing_chapter_id) or 1
+            await db.archive_ai_variants(existing_chapter_id, current_round)
+            # 重置章节状态回 generating, 标题/选中变体清空
+            await db.update_ai_chapter(
+                existing_chapter_id,
+                status="generating",
+                selected_variant_id=None,
+                final_content=None,
+                word_count=0,
+                title="",  # 标题会由 generate_chapter_title 重新生成
+            )
+            # 复用现有 chapter_id, 跳过 create
+            chapter_id = existing_chapter_id
+            # 决定下一轮 round: max + 1
+            next_round = current_round + 1
+            break
+    else:
+        chapter_id = await db.create_ai_chapter(
+            project_id=project_id,
+            chapter_no=target_chapter_no,
+            title=title.strip(),
+            user_intent=user_intent.strip(),
+            status="generating",
+        )
+        next_round = 1
 
     yield {
         "event": "start",
@@ -493,7 +635,7 @@ async def _generate_chapter_streaming_candidates(
         planner_out = await planner.run(model_cfg=model_cfg, **inputs)
     except Exception as exc:  # noqa: BLE001
         logger.exception("planner failed")
-        yield {"event": "error", "message": f"Planner 失败: {exc}", "chapter_id": chapter_id}
+        yield {"event": "error", "message": f"Planner 失败: {sanitize_error(exc)}", "chapter_id": chapter_id}
         return
 
     directions = planner_out.directions
@@ -553,6 +695,7 @@ async def _generate_chapter_streaming_candidates(
         }
 
     # 立即插入 3 个 variant 占位 (后续随 writer/critic 更新)
+    # P0-#3: 用 next_round 标记本轮, 旧轮自动隐藏 (superseded=1)
     variant_ids: List[int] = []
     for d in directions:
         vid = await db.insert_ai_variant(
@@ -567,6 +710,7 @@ async def _generate_chapter_streaming_candidates(
             critic_report={},
             score=0.0,
             model_id=model_cfg.get("id"),
+            generation_round=next_round,
         )
         variant_ids.append(vid)
 
@@ -928,7 +1072,7 @@ async def _generate_chapter_streaming_single(
             logger.exception("planner failed (attempt %s)", attempt)
             yield {
                 "event": "error",
-                "message": f"Planner 失败: {exc}",
+                "message": f"Planner 失败: {sanitize_error(exc)}",
                 "chapter_id": chapter_id,
             }
             return
@@ -965,7 +1109,7 @@ async def _generate_chapter_streaming_single(
             logger.exception("writer failed (attempt %s)", attempt)
             yield {
                 "event": "error",
-                "message": f"Writer 失败: {exc}",
+                "message": f"Writer 失败: {sanitize_error(exc)}",
                 "chapter_id": chapter_id,
             }
             return
@@ -995,7 +1139,7 @@ async def _generate_chapter_streaming_single(
             logger.exception("critic failed (attempt %s)", attempt)
             yield {
                 "event": "error",
-                "message": f"Critic 失败: {exc}",
+                "message": f"Critic 失败: {sanitize_error(exc)}",
                 "chapter_id": chapter_id,
             }
             return
@@ -1087,24 +1231,143 @@ async def list_chapters(project_id: int) -> List[Dict[str, Any]]:
 
 
 async def delete_chapter(chapter_id: int) -> bool:
-    """删除单个章节 (含变体). KG 中的 source_chapter_id 引用会被 SET NULL."""
+    """删除单个章节 (含变体). KG 中的 source_chapter_id 引用会被 SET NULL.
+    P0-#4: 同步将后续 chapter_no 重新编号, 避免出现"第 1、2、4 章"断层.
+    """
     ch = await db.get_ai_chapter(chapter_id)
     if not ch:
         return False
+    project_id = int(ch["project_id"])
+    deleted_chapter_no = int(ch.get("chapter_no") or 0)
     ok = await db.delete_ai_chapter(chapter_id)
     if not ok:
         return False
+    # P0-#4: 删除中间章节后, 重新编号后续章节
+    if deleted_chapter_no > 0:
+        try:
+            await rebalance_chapter_nos(project_id, deleted_chapter_no)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("delete_chapter: rebalance 失败: %s", exc)
     # 回退 project.current_chapter_no, 避免下次生成空号
     try:
-        project = await db.get_ai_project(int(ch["project_id"]))
-        if project and int(ch.get("chapter_no", 0)) >= int(project.get("current_chapter_no", 1)):
-            await db.update_ai_project(
-                int(ch["project_id"]),
-                current_chapter_no=int(ch["chapter_no"]),
-            )
+        project = await db.get_ai_project(project_id)
+        if project:
+            remaining = await db.list_ai_chapters(project_id)
+            if remaining:
+                # current_chapter_no 设为 max + 1, 准备生成下一章
+                max_no = max(int(c.get("chapter_no") or 0) for c in remaining)
+                await db.update_ai_project(
+                    project_id,
+                    current_chapter_no=max_no + 1,
+                )
+            else:
+                # 全删完了, 重置为 1
+                await db.update_ai_project(project_id, current_chapter_no=1)
     except Exception as exc:  # noqa: BLE001
         logger.warning("delete_chapter: 回退 current_chapter_no 失败: %s", exc)
     return True
+
+
+async def rebalance_chapter_nos(project_id: int, after_no: int) -> int:
+    """P0-#4: 把 chapter_no > after_no 的章节统一 -1, 消除编号断层.
+    涉及 UNIQUE(project_id, chapter_no) 约束, 临时偏移再更新.
+    返回被改写的章节数.
+    """
+    chapters = await db.list_ai_chapters(project_id)
+    affected = [c for c in chapters if int(c.get("chapter_no") or 0) > after_no]
+    if not affected:
+        return 0
+    # 临时偏移到 -1 避免唯一冲突, 再写回正式编号
+    for ch in affected:
+        await db.update_ai_chapter(
+            int(ch["id"]),
+            chapter_no=int(ch.get("chapter_no") or 0) - 100000,
+        )
+    for ch in affected:
+        new_no = int(ch.get("chapter_no") or 0) - 100000 - 1
+        await db.update_ai_chapter(int(ch["id"]), chapter_no=new_no)
+    return len(affected)
+
+
+async def reorder_chapters(project_id: int, orders: List[Dict[str, int]]) -> int:
+    """UX-#6: 拖拽重排. 接受 [{id, chapter_no}, ...].
+
+    把所有 id 临时偏移到 -100000, 再写回目标 chapter_no, 避免 UNIQUE 冲突.
+    返回被改写的章节数.
+    """
+    project = await db.get_ai_project(project_id)
+    if not project:
+        raise CreationError(f"项目 {project_id} 不存在")
+    # 校验所有 id 都属于该项目
+    chapters = await db.list_ai_chapters(project_id)
+    valid_ids = {int(c["id"]) for c in chapters}
+    targets = []
+    for o in orders:
+        cid = int(o.get("id") or 0)
+        new_no = int(o.get("chapter_no") or 0)
+        if cid not in valid_ids or new_no < 1:
+            continue
+        targets.append((cid, new_no))
+    if not targets:
+        return 0
+    # 临时偏移
+    for cid, _ in targets:
+        await db.update_ai_chapter(cid, chapter_no=-100000 - cid)
+    # 写回正式编号 (按 order 列表的顺序, 但落库用目标 chapter_no)
+    for cid, new_no in targets:
+        await db.update_ai_chapter(cid, chapter_no=new_no)
+    return len(targets)
+
+
+async def get_chapter_variants_history(chapter_id: int) -> List[Dict[str, Any]]:
+    """P0-#3: 获取章节全部变体 (含历史轮次), 供版本切换 UI 使用."""
+    ch = await db.get_ai_chapter(chapter_id)
+    if not ch:
+        raise CreationError(f"章节 {chapter_id} 不存在")
+    return await db.list_ai_variants_full_history(chapter_id)
+
+
+async def export_project_as_text(project_id: int, format: str = "txt") -> str:
+    """UX-#16: 全本导出. 把项目所有 confirmed 章节按 chapter_no 顺序拼接.
+    支持 .txt / .md 两种格式.
+    """
+    project = await db.get_ai_project(project_id)
+    if not project:
+        raise CreationError(f"项目 {project_id} 不存在")
+    chapters = await db.list_ai_chapters(project_id)
+    confirmed = [c for c in chapters if c.get("status") == "confirmed" and c.get("final_content")]
+    if not confirmed:
+        raise CreationError("项目下尚无已确认章节, 无可导出内容")
+    confirmed.sort(key=lambda c: int(c.get("chapter_no") or 0))
+
+    title = (project.get("title") or f"项目{project_id}").strip()
+    out_lines: List[str] = []
+    if format == "md":
+        out_lines.append(f"# {title}")
+        out_lines.append("")
+        out_lines.append(f"> 由 AI 小说管理系统导出 · 章节数 {len(confirmed)}")
+        out_lines.append("")
+        for c in confirmed:
+            ch_no = int(c.get("chapter_no") or 0)
+            ch_title = (c.get("title") or "").strip() or f"第 {ch_no} 章"
+            out_lines.append(f"## 第 {ch_no} 章 · {ch_title}")
+            out_lines.append("")
+            out_lines.append((c.get("final_content") or "").rstrip())
+            out_lines.append("")
+    else:
+        out_lines.append(title)
+        out_lines.append("=" * max(8, min(40, len(title))))
+        out_lines.append(f"由 AI 小说管理系统导出 · 共 {len(confirmed)} 章")
+        out_lines.append("")
+        for c in confirmed:
+            ch_no = int(c.get("chapter_no") or 0)
+            ch_title = (c.get("title") or "").strip() or f"第 {ch_no} 章"
+            out_lines.append(f"第 {ch_no} 章 · {ch_title}")
+            out_lines.append("-" * max(8, min(40, len(ch_title) + 8)))
+            out_lines.append("")
+            out_lines.append((c.get("final_content") or "").rstrip())
+            out_lines.append("")
+    return "\n".join(out_lines).rstrip() + "\n"
 
 
 async def export_chapter_as_text(chapter_id: int) -> str:

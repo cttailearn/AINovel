@@ -563,6 +563,13 @@ export const api = {
     // 重新订阅 SSE 事件流 (用于刷新后)
     subscribeUrl: (taskId) =>
       `${API_PREFIX}/tasks/${taskId}/events`,
+    // UX-#11: 任务快照镜像 (跨设备/重装恢复)
+    putMirror: (clientId, snapshot, options) =>
+      apiRequest(`/tasks/mirror/${encodeURIComponent(clientId)}`, {
+        method: 'PUT', body: snapshot, ...options,
+      }),
+    getMirror: (clientId, options) =>
+      apiRequest(`/tasks/mirror/${encodeURIComponent(clientId)}`, options),
   },
   creation: {
     // 项目
@@ -575,6 +582,9 @@ export const api = {
       apiRequest(`/creation/projects/${id}`, { method: 'PUT', body: payload, ...options }),
     deleteProject: (id, options) =>
       apiRequest(`/creation/projects/${id}`, { method: 'DELETE', ...options }),
+    // UX-#15: 复制项目
+    duplicateProject: (id, options) =>
+      apiRequest(`/creation/projects/${id}/duplicate`, { method: 'POST', ...options }),
     // 知识图谱
     getKG: (projectId, options) =>
       apiRequest(`/creation/projects/${projectId}/kg`, options),
@@ -584,6 +594,68 @@ export const api = {
       }),
     clearKG: (projectId, options) =>
       apiRequest(`/creation/projects/${projectId}/kg`, {
+        method: 'DELETE', ...options,
+      }),
+    // 知识图谱 CRUD (手动编辑节点 / 关系)
+    createKGCharacter: (projectId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/characters`, {
+        method: 'POST', body: payload, ...options,
+      }),
+    updateKGCharacter: (projectId, entityId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/characters/${encodeURIComponent(entityId)}`, {
+        method: 'PUT', body: payload, ...options,
+      }),
+    deleteKGCharacter: (projectId, entityId, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/characters/${encodeURIComponent(entityId)}`, {
+        method: 'DELETE', ...options,
+      }),
+    createKGEvent: (projectId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/events`, {
+        method: 'POST', body: payload, ...options,
+      }),
+    updateKGEvent: (projectId, entityId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/events/${encodeURIComponent(entityId)}`, {
+        method: 'PUT', body: payload, ...options,
+      }),
+    deleteKGEvent: (projectId, entityId, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/events/${encodeURIComponent(entityId)}`, {
+        method: 'DELETE', ...options,
+      }),
+    createKGLocation: (projectId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/locations`, {
+        method: 'POST', body: payload, ...options,
+      }),
+    updateKGLocation: (projectId, entityId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/locations/${encodeURIComponent(entityId)}`, {
+        method: 'PUT', body: payload, ...options,
+      }),
+    deleteKGLocation: (projectId, entityId, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/locations/${encodeURIComponent(entityId)}`, {
+        method: 'DELETE', ...options,
+      }),
+    createKGCeRelation: (projectId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/character-event-relations`, {
+        method: 'POST', body: payload, ...options,
+      }),
+    deleteKGRelation: (projectId, relKind, relId, options) =>
+      apiRequest(`/creation/projects/${projectId}/kg/relations/${relKind}/${relId}`, {
+        method: 'DELETE', ...options,
+      }),
+    // P1-#6: PlotThread (伏笔/线索) CRUD
+    listPlotThreads: (projectId, status, options) => {
+      const q = status ? `?status=${encodeURIComponent(status)}` : '';
+      return apiRequest(`/creation/projects/${projectId}/plot-threads${q}`, options);
+    },
+    createPlotThread: (projectId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/plot-threads`, {
+        method: 'POST', body: payload, ...options,
+      }),
+    updatePlotThread: (projectId, threadId, payload, options) =>
+      apiRequest(`/creation/projects/${projectId}/plot-threads/${encodeURIComponent(threadId)}`, {
+        method: 'PUT', body: payload, ...options,
+      }),
+    deletePlotThread: (projectId, threadId, options) =>
+      apiRequest(`/creation/projects/${projectId}/plot-threads/${encodeURIComponent(threadId)}`, {
         method: 'DELETE', ...options,
       }),
     // 章节
@@ -607,9 +679,15 @@ export const api = {
       apiRequest(`/creation/chapters/${chapterId}`, {
         method: 'DELETE', ...options,
       }),
+    // P0-#3: 章节变体历史 (含 superseded 的旧轮)
+    getVariantsHistory: (chapterId, options) =>
+      apiRequest(`/creation/chapters/${chapterId}/variants/history`, options),
     // 导出章节: 返回 { url, filename } 用于触发浏览器下载
     exportChapterUrl: (chapterId, format = 'txt') =>
       `${API_PREFIX}/creation/chapters/${chapterId}/export?format=${encodeURIComponent(format)}`,
+    // UX-#16: 全本导出 URL
+    exportProjectUrl: (projectId, format = 'txt') =>
+      `${API_PREFIX}/creation/projects/${projectId}/export?format=${encodeURIComponent(format)}`,
     // 生成 (SSE)
     generate: (projectId, payload, { onEvent, signal } = {}) =>
       postStream(`/creation/projects/${projectId}/chapters/generate`, payload, {
