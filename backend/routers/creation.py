@@ -47,6 +47,7 @@ from schemas import (
 )
 from services import creation_intake_service, creation_service
 from services.task_registry import KIND_CREATION, registry
+import database as db
 
 logger = logging.getLogger(__name__)
 
@@ -642,7 +643,6 @@ async def generate_chapter(project_id: int, payload: AiChapterGenerateRequest):
                 user_intent=payload.user_intent,
                 chapter_no=payload.chapter_no,
                 title=payload.title,
-                mode=payload.mode,
                 max_revise=payload.max_revise,
                 score_threshold=payload.score_threshold,
             ):

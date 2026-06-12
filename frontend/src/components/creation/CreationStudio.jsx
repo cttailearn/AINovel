@@ -317,10 +317,8 @@ export function CreationStudio({ models = [], topSearch = '' }) {
         userIntent: user_intent,
         chapterNo: chapter_no,
         title,
-        // 默认走 "single" 模式: 一次只产 1 个候选, Critic 评分不达标自动
-        // 回到 Planner + Writer 改写, 最多重试 2 轮 (含首次共 3 次尝试),
-        // 综合分 >= 7.0 视为通过. 旧 3 候选体验可通过 mode='candidates' 启用.
-        mode: 'single',
+        // 单候选 + Critic 循环: Critic 评分不达标自动回到 Planner + Writer
+        // 改写, 最多重试 2 轮 (含首次共 3 次尝试), 综合分 >= 7.0 视为通过.
         maxRevise: 2,
         scoreThreshold: 7.0,
         onProgress: (ev) => {
@@ -614,6 +612,12 @@ export function CreationStudio({ models = [], topSearch = '' }) {
         handleExportChapter={handleExportChapter}
         handleDeleteChapter={handleDeleteChapter}
         handleRegenerateChapter={handleRegenerateChapter}
+        handleBatchDelete={handleBatchDelete}
+        handleBatchExport={handleBatchExport}
+        handleReorder={handleReorder}
+        lastAttempt={lastAttempt}
+        chapterGenError={chapterGenError}
+        startTime={creationTask.startTime}
       />
     </>
   );
@@ -737,6 +741,8 @@ function NotionWorkspace(props) {
     setActiveChapterId, handleGenerate, handleSelectVariant, handleEditVariant,
     handleSaveContent, handleConfirmChapter, handleExportChapter,
     handleDeleteChapter, handleRegenerateChapter,
+    handleBatchDelete, handleBatchExport, handleReorder,
+    lastAttempt, chapterGenError, startTime,
   } = props;
 
   const project = projectDetail.project;
@@ -943,6 +949,7 @@ function NotionWorkspace(props) {
             onExitFocusMode={() => setFocusMode(false)}
             lastAttempt={lastAttempt}
             chapterGenError={chapterGenError}
+            startTime={startTime}
           />
 
           {referenceOpen && !focusMode && (
@@ -1338,6 +1345,7 @@ function CanvasPane({
   onExitFocusMode,
   lastAttempt = null,
   chapterGenError = null,
+  startTime = null,
 }) {
   const nextChapterNo = project.current_chapter_no || 1;
   const isRegen = !!regenOf;
@@ -1412,7 +1420,7 @@ function CanvasPane({
               onCancelRegen={() => setRegenOf(null)}
             />
           ) : generating ? (
-            <GenerationProgress progress={genProgress} startTime={creationTask.startTime} />
+            <GenerationProgress progress={genProgress} startTime={startTime} />
           ) : !chapterDetail ? (
             <ChapterGenerator
               project={project}
@@ -1757,51 +1765,81 @@ function GenerationProgress({ progress, startTime }) {
   const stage = progress.stage || 'start';
   const variants = progress.variants || {};
   const attemptScores = progress.attempt_scores || [];
-  const isSingle = progress.mode === 'single' || variants[0] != null && variants[1] == null && variants[2] == null;
   const threshold = progress.score_threshold;
+  const maxAttempts = progress.max_attempts || (progress.max_revise != null ? progress.max_revise + 1 : null);
+  const stageLabelMap = {
+    start: '准备生成',
+    planner_done: '规划完成',
+    writer_0_done: '正文撰写完成',
+    critic_0_done: '审校完成',
+    bridge_done: '承接检测完成',
+    revision_start: '准备重写',
+    critic_rejected: '审校未通过',
+    done: '完成',
+    error: '出错',
+  };
+  const stageLabel = stageLabelMap[stage] || stage;
   return (
     <div className="creation-generation-progress">
       <div className="creation-progress-header">
-        <h4 style={{ margin: 0, display: 'inline-block' }}>
-          {isSingle ? '单候选生成' : '生成中'}: {stage}
-          {progress.attempt ? ` · 第 ${progress.attempt} / ${progress.max_attempts || progress.max_revise + 1 || '?'} 轮` : ''}
+        <h4 className="creation-progress-title">
+          <span className="creation-progress-stage-dot" />
+          {'单候选生成'} · {stageLabel}
+          {progress.attempt && maxAttempts ? (
+            <span className="creation-progress-chip">
+              第 {progress.attempt} / {maxAttempts} 轮
+            </span>
+          ) : null}
+          {progress.directions && progress.directions.length > 0 && progress.directions[0]?.title ? (
+            <span className="creation-progress-direction" title={progress.directions[0].synopsis || ''}>
+              📍 {progress.directions[0].title}
+            </span>
+          ) : null}
         </h4>
         {elapsedSec != null && (
           <span
-            className="creation-progress-elapsed muted small"
+            className="creation-progress-elapsed"
             title="自本次生成开始已耗时"
-            style={{ marginLeft: 12 }}
           >
             ⏱ {fmtElapsed(elapsedSec)}
           </span>
         )}
       </div>
-      {isSingle && typeof threshold === 'number' && (
-        <div className="muted small">
-          Critic 通过阈值: ≥ {threshold.toFixed(1)}/10
-          {attemptScores.length > 0 && (
-            <> · 历次评分: {attemptScores
-              .map((a) => `${a.attempt}:${a.score.toFixed(1)}`)
-              .join(' / ')}</>
-          )}
+
+      {/* 历次评分: 仅当有评分时才出现, 用 chip 取代纯文本 */}
+      {attemptScores.length > 0 && (
+        <div className="creation-progress-score-row">
+          <span className="creation-progress-score-label">历次评分</span>
+          <div className="creation-progress-score-chips">
+            {attemptScores.map((a) => {
+              const passed = typeof threshold === 'number' && a.score >= threshold;
+              return (
+                <span
+                  key={a.attempt}
+                  className={`creation-progress-score-chip ${passed ? 'is-pass' : 'is-fail'}`}
+                  title={`第 ${a.attempt} 轮 ${passed ? '通过' : '未通过'}`}
+                >
+                  {passed ? '✓' : '✗'} {a.attempt}: {a.score.toFixed(1)}
+                </span>
+              );
+            })}
+            {typeof threshold === 'number' && (
+              <span className="creation-progress-score-threshold">阈值 {threshold.toFixed(1)}</span>
+            )}
+          </div>
         </div>
       )}
-      {progress.directions && progress.directions.length > 0 && (
-        <div className="muted small">
-          Planner 已生成 {progress.directions.length} 个分叉方向
-          {isSingle && ' (本模式仅取方向 0 撰写)'}
-        </div>
-      )}
+
       {progress.bridge_score != null && (
-        <div className="muted small">
-          🔗 接缝质量 {progress.bridge_score.toFixed(1)}/10
+        <div className="creation-progress-bridge">
+          <span>🔗 接缝质量 {progress.bridge_score.toFixed(1)}/10</span>
           {progress.bridge_conflicts && progress.bridge_conflicts.length > 0 &&
-            ` · ${progress.bridge_conflicts.length} 个承接冲突`}
+            <span className="creation-progress-bridge-conflict">· {progress.bridge_conflicts.length} 个承接冲突</span>}
         </div>
       )}
       {stage === 'revision_start' && (
         <p className="creation-progress-revision">
-          🔁 第 {progress.attempt} 轮重做中 (上轮评分 {progress.previous_score?.toFixed(1)}/10 未达阈值)
+          🔁 第 {progress.attempt} 轮重写中 (上轮评分 {progress.previous_score?.toFixed(1)}/10 未达阈值)
         </p>
       )}
       {stage === 'critic_rejected' && progress.last_rejected && (
@@ -1818,7 +1856,7 @@ function GenerationProgress({ progress, startTime }) {
             return (
               <li key={i} className={`creation-progress-variant ${v.state || 'pending'}`}>
                 <span>
-                  {isSingle ? '正文' : `版本 ${i + 1}`}
+                  正文
                   {typeof v.word_count === 'number' ? ` (${v.word_count} 字)` : ''}
                 </span>
                 <span>

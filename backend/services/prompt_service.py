@@ -972,6 +972,11 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
             "3) 地点 (locations): 含 name + location_type(城市/建筑/秘境/区域/异空间) + attributes(坐标/气候/控制势力/禁制/描述)\n"
             "4) 关系: char→char, char→event, event→event(causal/temporal/spatial), char→location\n"
             "5) 冲突标注 (conflicts_in_text): 如本章陈述与已知图谱冲突, 明确指出 [{{entity, claim, kg_fact, severity}}].\n"
+            "**额外要求** (用于 RAG 检索增强):\n"
+            "6) **aliases** (可选, 强烈建议): 同实体的其他称呼. 例: 张三 / 小张 / 三哥 / 张大侠 / 剑痴.\n"
+            "   抽取原则: ① 章节正文中实际出现过的其他称呼 ② 不超过 5 个, 每个 2-6 字.\n"
+            "7) **description** (可选, 强烈建议): 1~2 句对实体的本质描述. 例: 「张三, 主角, 出身寒门, 武学天才, 性格倔强好胜.」\n"
+            "   用于知识图谱 RAG 检索时的语义匹配, 不要超过 80 字.\n"
             "只输出严格 JSON, 不要解释、注释或 Markdown 代码块."
         ),
         "user_prompt_template": """# 章节正文
@@ -985,6 +990,8 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 延续已知图谱的实体, 仅记录**新属性**与**新关系**, 避免重复入库.
 - entity_id 形式: char_NNN / evt_NNN / loc_NNN. 复用上文已出现的同名 ID.
 - importance 必填 (1-5, 5=主线), 不可省略.
+- **aliases**: 章节中出现的其他称呼 (老王/王大爷/村长...→ 实体「王大爷」). 必须是正文中**实际出现**的, 不要凭空捏造.
+- **description**: 1~2 句对实体的核心描述, 帮助后续章节召回.
 - 若章节与下方「已知冲突」冲突, 必须在 conflicts_in_text 列出, 便于下一章避开.
 
 # 已知冲突 (来自知识图谱, 必须回填/避开)
@@ -993,17 +1000,22 @@ DEFAULT_PROMPTS: List[Dict[str, Any]] = [
 【严格 JSON 输出】格式:
 {{
   "characters": [
-    {{"entity_id": "char_001", "name": "张三", "role": "主角", "faction": "武林盟", "status": "存活",
-     "importance": 5,
+    {{"entity_id": "char_001", "name": "张三", "aliases": ["小张", "三哥", "张大侠"],
+     "description": "主角, 出身寒门的武学天才, 性格倔强好胜.",
+     "role": "主角", "faction": "武林盟", "status": "存活", "importance": 5,
      "attributes": {{"性别": "男", "身份": "剑客", "年龄": 28, "性格": "沉默寡言", "当前状态": "负伤"}}}}
   ],
   "events": [
-    {{"entity_id": "evt_001", "name": "张三夜探幽冥谷", "in_story_time": "第3年 暮春", "chapter_time_label": "第3章 夜",
+    {{"entity_id": "evt_001", "name": "张三夜探幽冥谷", "aliases": ["夜探", "幽冥谷探秘"],
+     "description": "主角独自潜入幽冥谷, 触发密室机关, 险些丧命.",
+     "in_story_time": "第3年 暮春", "chapter_time_label": "第3章 夜",
      "importance": 5,
      "attributes": {{"地点": "幽冥谷", "结果": "触发密室机关"}}}}
   ],
   "locations": [
-    {{"entity_id": "loc_001", "name": "幽冥谷", "location_type": "秘境",
+    {{"entity_id": "loc_001", "name": "幽冥谷", "aliases": ["幽谷", "鬼谷"],
+     "description": "终年阴雨的神秘山谷, 幽冥教腹地, 入口有禁制.",
+     "location_type": "秘境",
      "attributes": {{"控制势力": "幽冥教", "禁制": "夜半禁入", "气候": "常年阴雨"}}}}
   ],
   "character_event_relations": [

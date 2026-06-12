@@ -1,5 +1,107 @@
 /* AI 小说创作模块样式 - Notion 文档式布局 */
 
+/* === 暗色模式: 覆盖本模块使用的 CSS 变量 === */
+[data-theme="dark"] {
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #141414;
+  --bg-soft: #1f1f1f;
+  --bg-hover: #232323;
+  --border-color: #2a2a2a;
+  --text-primary: #f5f5f5;
+  --text-muted: #9a9a9a;
+  --accent-color: #818cf8;
+  --accent-soft: rgba(129, 140, 248, 0.18);
+  --hover-bg: #232323;
+  --input-bg: #1f1f1f;
+  --code-bg: #0f0f0f;
+  --shadow-color: rgba(0, 0, 0, 0.5);
+}
+
+/* === 暗色模式: 覆盖硬编码颜色 === */
+[data-theme="dark"] .status-pill.tone-ok {
+  background: rgba(34, 197, 94, 0.18);
+  color: #4ade80;
+}
+[data-theme="dark"] .status-pill.tone-warn {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+}
+[data-theme="dark"] .status-pill.tone-info {
+  background: rgba(59, 130, 246, 0.18);
+  color: #60a5fa;
+}
+[data-theme="dark"] .status-pill.tone-muted {
+  background: #2a2a2a;
+  color: #9a9a9a;
+}
+[data-theme="dark"] .creation-score.tone-high {
+  background: rgba(34, 197, 94, 0.2);
+  color: #4ade80;
+}
+[data-theme="dark"] .creation-score.tone-mid {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+}
+[data-theme="dark"] .creation-score.tone-low {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+}
+[data-theme="dark"] .creation-retry-banner {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+}
+[data-theme="dark"] .creation-success-banner {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.3);
+  color: #4ade80;
+}
+[data-theme="dark"] .creation-variant-card.is-selected {
+  border-color: #818cf8;
+  background: rgba(129, 140, 248, 0.06);
+}
+[data-theme="dark"] .btn-primary {
+  background: #818cf8;
+  color: #0a0a0a;
+}
+[data-theme="dark"] .btn-primary:hover {
+  background: #a5b4fc;
+}
+[data-theme="dark"] .btn-ghost {
+  color: #d4d4d4;
+}
+[data-theme="dark"] .btn-ghost:hover {
+  background: #232323;
+  color: #f5f5f5;
+}
+[data-theme="dark"] .btn-ghost.danger {
+  color: #f87171;
+}
+[data-theme="dark"] .btn-ghost.danger:hover {
+  background: rgba(239, 68, 68, 0.12);
+}
+[data-theme="dark"] input[type="text"],
+[data-theme="dark"] input[type="number"],
+[data-theme="dark"] input[type="search"],
+[data-theme="dark"] textarea,
+[data-theme="dark"] select {
+  background: #1f1f1f;
+  color: #f5f5f5;
+  border-color: #2a2a2a;
+}
+[data-theme="dark"] input::placeholder,
+[data-theme="dark"] textarea::placeholder {
+  color: #6a6a6a;
+}
+[data-theme="dark"] code,
+[data-theme="dark"] pre {
+  background: #0f0f0f;
+  color: #e5e5e5;
+}
+[data-theme="dark"] .muted {
+  color: #9a9a9a;
+}
+
 .creation-studio {
   display: flex;
   flex-direction: column;
@@ -2285,16 +2387,225 @@
 
 .creation-generation-progress {
   flex: 1 1 auto;
-  padding: 16px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .creation-generation-progress h4 {
   margin: 0;
   font-size: 14px;
   color: var(--text-muted, #6b7280);
+}
+
+/* === 进度区 header: stage 名 + 轮次 chip + 方向提示 + 计时 === */
+.creation-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--border-color, #e5e7eb);
+}
+
+.creation-progress-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #111827);
+}
+
+.creation-progress-stage-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-color, #6366f1);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.18);
+  animation: creation-progress-pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes creation-progress-pulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.18); opacity: 0.7; }
+  50%      { box-shadow: 0 0 0 6px rgba(99, 102, 241, 0.32); opacity: 1;   }
+}
+
+.creation-progress-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-bg, #eef2ff);
+  color: var(--accent-color, #4338ca);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.creation-progress-direction {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-soft, #f3f4f6);
+  color: var(--text-secondary, #4b5563);
+  font-size: 12px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creation-progress-elapsed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-soft, #f3f4f6);
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* === 历次评分: label + chips + 阈值 === */
+.creation-progress-score-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.creation-progress-score-label {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+.creation-progress-score-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.creation-progress-score-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.creation-progress-score-chip.is-pass {
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.creation-progress-score-chip.is-fail {
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.creation-progress-score-threshold {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted, #6b7280);
+  font-size: 11px;
+  font-style: italic;
+  border: 1px dashed var(--border-color, #e5e7eb);
+  white-space: nowrap;
+}
+
+/* === 接缝质量 === */
+.creation-progress-bridge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--bg-soft, #f9fafb);
+  color: var(--text-secondary, #4b5563);
+  font-size: 12px;
+  width: fit-content;
+}
+
+.creation-progress-bridge-conflict {
+  color: var(--danger-color, #b45309);
+  font-weight: 500;
+}
+
+/* 暗色模式适配 */
+[data-theme="dark"] .creation-progress-stage-dot {
+  box-shadow: 0 0 0 4px rgba(129, 140, 248, 0.22);
+}
+@keyframes creation-progress-pulse-dark {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(129, 140, 248, 0.22); opacity: 0.7; }
+  50%      { box-shadow: 0 0 0 6px rgba(129, 140, 248, 0.4);  opacity: 1;   }
+}
+[data-theme="dark"] .creation-progress-stage-dot {
+  animation-name: creation-progress-pulse-dark;
+}
+
+[data-theme="dark"] .creation-progress-chip {
+  background: rgba(129, 140, 248, 0.18);
+  color: #a5b4fc;
+}
+
+[data-theme="dark"] .creation-progress-direction {
+  background: #1f1f1f;
+  color: #d4d4d4;
+}
+
+[data-theme="dark"] .creation-progress-elapsed {
+  background: #1f1f1f;
+  color: #9a9a9a;
+}
+
+[data-theme="dark"] .creation-progress-score-chip.is-pass {
+  background: rgba(34, 197, 94, 0.18);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+[data-theme="dark"] .creation-progress-score-chip.is-fail {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+[data-theme="dark"] .creation-progress-score-threshold {
+  color: #9a9a9a;
+  border-color: #2a2a2a;
+}
+
+[data-theme="dark"] .creation-progress-bridge {
+  background: #1f1f1f;
+  color: #d4d4d4;
+}
+
+[data-theme="dark"] .creation-progress-bridge-conflict {
+  color: #fbbf24;
 }
 
 .creation-progress-variants {
@@ -2403,6 +2714,7 @@
   width: 100%;
   height: 100%;
   position: relative;
+  overflow: hidden;
 }
 
 /* --- 顶栏: 项目切换器 + 进度 + 操作 --- */
@@ -2716,6 +3028,7 @@
   min-height: 0;
   height: 100%;
   width: 100%;
+  overflow: hidden;
 }
 
 .creation-workspace-body.creation-workspace-notion-body.is-reference-collapsed {
@@ -2779,6 +3092,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
   border-right: 1px solid var(--border-color, #e5e7eb);
   background: var(--bg-primary, #fff);
   overflow: hidden;
@@ -2878,7 +3192,7 @@
 }
 
 .creation-toc-pane-body {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   padding: 8px;
@@ -2898,6 +3212,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
   background: var(--bg-primary, #fff);
   overflow: hidden;
 }
@@ -2905,7 +3220,7 @@
 .creation-canvas-pane-inner {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -2929,7 +3244,7 @@
 }
 
 .creation-canvas-body {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   padding: 16px 20px;
@@ -2951,6 +3266,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
   border-left: 1px solid var(--border-color, #e5e7eb);
   background: var(--bg-secondary, #fafafa);
   overflow: hidden;
@@ -2976,7 +3292,7 @@
 }
 
 .creation-reference-pane-body {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   padding: 10px 12px;

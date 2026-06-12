@@ -169,46 +169,12 @@ export function ChapterGenerator({
         <div className="creation-generator-progress">
           <div className="creation-stage-list">
             {(() => {
-              // P0-#1: 阶段名根据 mode 动态生成
-              // single 模式: planner → writer → critic → done, 单条流水线
-              // candidates 模式: 3 候选并行, 共 9 步
-              const isSingle = progress?.mode === 'single'
-                || (progress?.directions?.length || 0) <= 1;
-              if (isSingle) {
-                const stages = [
-                  ['start', '初始化'],
-                  ['planner_done', '决策 Agent (Planner)'],
-                  ['writer_0_done', '撰写 Agent (Writer)'],
-                  ['critic_0_done', '审核 Agent (Critic)'],
-                  ['done', '完成'],
-                ];
-                return stages.map(([key, label]) => {
-                  const cur = progress?.stage;
-                  const curIdx = stages.findIndex(([k]) => k === cur);
-                  const thisIdx = stages.findIndex(([k]) => k === key);
-                  const state = curIdx < 0 ? 'todo'
-                    : thisIdx < curIdx ? 'done'
-                    : thisIdx === curIdx ? 'active' : 'todo';
-                  return (
-                    <div key={key} className={`creation-stage stage-${state}`}>
-                      <span className="creation-stage-mark">
-                        {state === 'done' ? '✓' : state === 'active' ? '●' : '○'}
-                      </span>
-                      <span>{label}</span>
-                    </div>
-                  );
-                });
-              }
-              // candidates 模式: 保留旧的 9 步
+              // 单候选流水线: planner → writer → critic → done
               const stages = [
                 ['start', '初始化'],
-                ['planner_done', '决策 Agent (Planner) · 3 个方向'],
-                ['writer_0_done', '执行 Agent 1 · 动作方向'],
-                ['writer_1_done', '执行 Agent 2 · 心理方向'],
-                ['writer_2_done', '执行 Agent 3 · 意外方向'],
-                ['critic_0_done', '审核 Agent 1'],
-                ['critic_1_done', '审核 Agent 2'],
-                ['critic_2_done', '审核 Agent 3'],
+                ['planner_done', '决策 Agent (Planner)'],
+                ['writer_0_done', '撰写 Agent (Writer)'],
+                ['critic_0_done', '审核 Agent (Critic)'],
                 ['done', '完成'],
               ];
               return stages.map(([key, label]) => {
@@ -230,7 +196,7 @@ export function ChapterGenerator({
             })()}
           </div>
 
-          {progress?.directions && (
+          {progress?.directions && progress.directions.length > 0 && (
             <div className="creation-directions">
               <h4>Planner 决策方向</h4>
               <ol>
@@ -243,35 +209,23 @@ export function ChapterGenerator({
             </div>
           )}
 
-          {progress?.variants && Object.keys(progress.variants).length > 0 && (
+          {progress?.variants && progress.variants[0] && (
             <div className="creation-variant-progress">
-              <h4>候选进度</h4>
-              {[0, 1, 2].map((i) => {
-                const v = progress.variants[i];
-                if (!v) {
-                  return (
-                    <div key={i} className="creation-variant-row muted small">
-                      候选 {i + 1}: 等待中...
-                    </div>
-                  );
-                }
-                return (
-                  <div key={i} className="creation-variant-row">
-                    <span>候选 {i + 1}</span>
-                    <span className={`creation-variant-state state-${v.state}`}>
-                      {v.state === 'writing' && '写作中...'}
-                      {v.state === 'critiquing' && '审核中...'}
-                      {v.state === 'done' && (
-                        <>
-                          完成 <ScoreBadge score={v.score} />
-                          {v.word_count ? ` · ${v.word_count} 字` : ''}
-                        </>
-                      )}
-                      {v.state === 'error' && `失败: ${v.error || ''}`}
-                    </span>
-                  </div>
-                );
-              })}
+              <h4>撰写进度</h4>
+              <div className="creation-variant-row">
+                <span>正文</span>
+                <span className={`creation-variant-state state-${progress.variants[0].state}`}>
+                  {progress.variants[0].state === 'critiquing' && '审核中...'}
+                  {progress.variants[0].state === 'done' && (
+                    <>
+                      完成 <ScoreBadge score={progress.variants[0].score} />
+                      {progress.variants[0].word_count ? ` · ${progress.variants[0].word_count} 字` : ''}
+                    </>
+                  )}
+                  {progress.variants[0].state === 'error' && `失败: ${progress.variants[0].error || ''}`}
+                  {!['critiquing', 'done', 'error'].includes(progress.variants[0].state) && '写作中...'}
+                </span>
+              </div>
             </div>
           )}
 

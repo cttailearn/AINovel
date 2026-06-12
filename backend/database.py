@@ -600,6 +600,8 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
             "status": "TEXT",  # 存活 / 失踪 / 死亡 / 转生
             "first_appearance_chapter_id": "INTEGER",
             "importance": "INTEGER",  # 1..5
+            "aliases": "TEXT",     # JSON list[str], 别名 (老王 ↔ 王大爷)
+            "description": "TEXT",  # 1~2 句描述, 给 RAG-lite 检索更多匹配文本
         }
         for col, ty in new_char_cols.items():
             if col not in char_columns:
@@ -615,6 +617,8 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
             "in_story_time": "TEXT",  # "第3年 暮春"
             "chapter_time_label": "TEXT",  # "第3章 夜"
             "importance": "INTEGER",
+            "aliases": "TEXT",
+            "description": "TEXT",
         }
         for col, ty in new_ev_cols.items():
             if col not in ev_columns:
@@ -622,6 +626,20 @@ async def _run_migrations(db: aiosqlite.Connection) -> None:
                     f"ALTER TABLE ai_kg_events ADD COLUMN {col} {ty}"
                 )
                 logger.info("Migration: added ai_kg_events.%s", col)
+
+    # ④ ai_kg_locations 也加 aliases + description (一致性)
+    loc_columns = await _get_table_columns(db, "ai_kg_locations")
+    if loc_columns:
+        new_loc_cols = {
+            "aliases": "TEXT",
+            "description": "TEXT",
+        }
+        for col, ty in new_loc_cols.items():
+            if col not in loc_columns:
+                await db.execute(
+                    f"ALTER TABLE ai_kg_locations ADD COLUMN {col} {ty}"
+                )
+                logger.info("Migration: added ai_kg_locations.%s", col)
 
     # ⑥ ai_kg_character_relations 加时间窗口
     ccrel_columns = await _get_table_columns(db, "ai_kg_character_relations")
@@ -1091,6 +1109,72 @@ def _build_relation_extras(obj: Dict[str, Any]) -> Dict[str, Any]:
     """关系类的 extras 构造: 同上, 但 evidence 既可来自单条 span,
     也可来自两个端点的 span 合并(由 orchestrator 负责)."""
     return _build_entity_extras(obj)
+
+
+# RAG-lite 改进: 别名 + description 的归一化与合并工具
+_ALIAS_ATTR_KEYS = ("别名", "alias", "aliases", "字号", "绰号")
+
+
+def _extract_aliases_from_obj(obj: Dict[str, Any]) -> List[str]:
+    """从 LLM 抽出的实体 dict 抽 aliases: 顶层 aliases + attributes.别名/字号 等."""
+    out: List[str] = []
+    top = obj.get("aliases")
+    if isinstance(top, list):
+        for x in top:
+            v = str(x or "").strip()
+            if v:
+                out.append(v)
+    elif isinstance(top, str) and top.strip():
+        out.append(top.strip())
+    attrs = obj.get("attributes") or {}
+    if isinstance(attrs, dict):
+        for k in _ALIAS_ATTR_KEYS:
+            v = attrs.get(k)
+            if isinstance(v, list):
+                for x in v:
+                    s = str(x or "").strip()
+                    if s:
+                        out.append(s)
+            elif isinstance(v, str) and v.strip():
+                out.append(v.strip())
+    # 去重 + 排除空 + 限制长度
+    seen: Set[str] = set()
+    deduped: List[str] = []
+    for a in out:
+        if 1 <= len(a) <= 30 and a not in seen:
+            deduped.append(a)
+            seen.add(a)
+    return deduped[:10]  # 最多 10 个
+
+
+def _merge_aliases(old: List[str], new: List[str]) -> List[str]:
+    """合并新旧 aliases, 保留前 10 个. old 优先 (历史称呼不应被覆盖)."""
+    seen: Set[str] = set()
+    merged: List[str] = []
+    for src in (old, new):
+        for a in src:
+            if a and a not in seen:
+                merged.append(a)
+                seen.add(a)
+    return merged[:10]
+
+
+def _aliases_from_db(raw: Optional[str]) -> List[str]:
+    """从 DB 读出的 aliases 字符串解析回 list[str]. 兼容 legacy (空 / 非 JSON)."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [str(x).strip() for x in data if str(x).strip()]
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return []
+
+
+def _aliases_to_db(aliases: List[str]) -> str:
+    """将 list[str] 序列化为 DB JSON 字符串."""
+    return json.dumps(aliases, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -2389,7 +2473,7 @@ async def upsert_ai_kg_from_extraction(
             if not entity_id:
                 continue
             cur = await db.execute(
-                "SELECT id, attributes FROM ai_kg_characters "
+                "SELECT id, attributes, aliases, description FROM ai_kg_characters "
                 "WHERE project_id = ? AND entity_id = ?",
                 (project_id, entity_id),
             )
@@ -2406,6 +2490,9 @@ async def upsert_ai_kg_from_extraction(
                 "importance": c.get("importance"),
             }
             structured = {k: v for k, v in structured.items() if v not in (None, "")}
+            # RAG-lite: aliases + description 解析
+            new_aliases = _extract_aliases_from_obj(c)
+            new_description = str(c.get("description") or "").strip()[:500]
 
             if row:
                 old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
@@ -2413,11 +2500,22 @@ async def upsert_ai_kg_from_extraction(
                 extras["source_chapter_ids"] = list(
                     set((extras.get("source_chapter_ids") or []) + ([source_chapter_id] if source_chapter_id else []))
                 )
+                # 别名合并: 历史优先, 新增 append
+                old_aliases = _aliases_from_db(row["aliases"])
+                merged_aliases = _merge_aliases(old_aliases, new_aliases)
+                # description: 优先保留较长的那个
+                old_description = (row["description"] or "").strip()
+                final_description = (
+                    new_description if len(new_description) >= len(old_description)
+                    else old_description
+                )
                 # 动态 SET 子句: 只更新有值的新结构化字段
                 set_clauses = [
                     "name = ?",
                     "attributes = ?",
                     "extras = ?",
+                    "aliases = ?",
+                    "description = ?",
                     "source_chapter_id = COALESCE(?, source_chapter_id)",
                     "updated_at = CURRENT_TIMESTAMP",
                 ]
@@ -2425,6 +2523,8 @@ async def upsert_ai_kg_from_extraction(
                     str(c.get("name", "")).strip()[:200] or entity_id,
                     _encode_attributes(merged_attrs),
                     _encode_extras(extras),
+                    _aliases_to_db(merged_aliases),
+                    final_description,
                     source_chapter_id,
                 ]
                 for k, v in structured.items():
@@ -2439,19 +2539,23 @@ async def upsert_ai_kg_from_extraction(
                     "id": row["id"], "project_id": project_id, "entity_id": entity_id,
                     "name": c.get("name", ""), "attributes": merged_attrs,
                     "source_chapter_id": source_chapter_id, "extras": extras,
+                    "aliases": merged_aliases, "description": final_description,
                     **structured,
                 })
             else:
                 if source_chapter_id:
                     extras["source_chapter_ids"] = [source_chapter_id]
                 cols = ["project_id", "entity_id", "name", "attributes",
-                        "source_chapter_id", "model_id", "extras"]
+                        "source_chapter_id", "model_id", "extras",
+                        "aliases", "description"]
                 vals: List[Any] = [
                     project_id, entity_id,
                     str(c.get("name", "")).strip()[:200] or entity_id,
                     _encode_attributes(merged_attrs),
                     source_chapter_id, model_id,
                     _encode_extras(extras),
+                    _aliases_to_db(new_aliases),
+                    new_description,
                 ]
                 for k, v in structured.items():
                     cols.append(k)
@@ -2492,7 +2596,7 @@ async def upsert_ai_kg_from_extraction(
             if not entity_id:
                 continue
             cur = await db.execute(
-                "SELECT id, attributes FROM ai_kg_events "
+                "SELECT id, attributes, aliases, description FROM ai_kg_events "
                 "WHERE project_id = ? AND entity_id = ?",
                 (project_id, entity_id),
             )
@@ -2505,6 +2609,8 @@ async def upsert_ai_kg_from_extraction(
                 "importance": e.get("importance"),
             }
             structured = {k: v for k, v in structured.items() if v not in (None, "")}
+            new_aliases = _extract_aliases_from_obj(e)
+            new_description = str(e.get("description") or "").strip()[:500]
 
             if row:
                 old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
@@ -2512,8 +2618,16 @@ async def upsert_ai_kg_from_extraction(
                 extras["source_chapter_ids"] = list(
                     set((extras.get("source_chapter_ids") or []) + ([source_chapter_id] if source_chapter_id else []))
                 )
+                old_aliases = _aliases_from_db(row["aliases"])
+                merged_aliases = _merge_aliases(old_aliases, new_aliases)
+                old_description = (row["description"] or "").strip()
+                final_description = (
+                    new_description if len(new_description) >= len(old_description)
+                    else old_description
+                )
                 set_clauses = [
                     "name = ?", "attributes = ?", "extras = ?",
+                    "aliases = ?", "description = ?",
                     "source_chapter_id = COALESCE(?, source_chapter_id)",
                     "updated_at = CURRENT_TIMESTAMP",
                 ]
@@ -2521,6 +2635,8 @@ async def upsert_ai_kg_from_extraction(
                     str(e.get("name", "")).strip()[:200] or entity_id,
                     _encode_attributes(merged_attrs),
                     _encode_extras(extras),
+                    _aliases_to_db(merged_aliases),
+                    final_description,
                     source_chapter_id,
                 ]
                 for k, v in structured.items():
@@ -2535,19 +2651,23 @@ async def upsert_ai_kg_from_extraction(
                     "id": row["id"], "project_id": project_id, "entity_id": entity_id,
                     "name": e.get("name", ""), "attributes": merged_attrs,
                     "source_chapter_id": source_chapter_id, "extras": extras,
+                    "aliases": merged_aliases, "description": final_description,
                     **structured,
                 })
             else:
                 if source_chapter_id:
                     extras["source_chapter_ids"] = [source_chapter_id]
                 cols = ["project_id", "entity_id", "name", "attributes",
-                        "source_chapter_id", "model_id", "extras"]
+                        "source_chapter_id", "model_id", "extras",
+                        "aliases", "description"]
                 vals: List[Any] = [
                     project_id, entity_id,
                     str(e.get("name", "")).strip()[:200] or entity_id,
                     _encode_attributes(merged_attrs),
                     source_chapter_id, model_id,
                     _encode_extras(extras),
+                    _aliases_to_db(new_aliases),
+                    new_description,
                 ]
                 for k, v in structured.items():
                     cols.append(k)
@@ -2561,6 +2681,7 @@ async def upsert_ai_kg_from_extraction(
                     "id": cur.lastrowid, "project_id": project_id, "entity_id": entity_id,
                     "name": e.get("name", ""), "attributes": merged_attrs,
                     "source_chapter_id": source_chapter_id, "extras": extras,
+                    "aliases": new_aliases, "description": new_description,
                     **structured,
                 })
 
@@ -2570,21 +2691,31 @@ async def upsert_ai_kg_from_extraction(
             if not entity_id:
                 continue
             cur = await db.execute(
-                "SELECT id, attributes FROM ai_kg_locations "
+                "SELECT id, attributes, aliases, description FROM ai_kg_locations "
                 "WHERE project_id = ? AND entity_id = ?",
                 (project_id, entity_id),
             )
             row = await cur.fetchone()
             merged_attrs = {**(loc.get("attributes") or {})}
             extras = _build_entity_extras(loc)
+            new_aliases = _extract_aliases_from_obj(loc)
+            new_description = str(loc.get("description") or "").strip()[:500]
             if row:
                 old_attrs = _decode_attributes(row["attributes"]) if row["attributes"] else {}
                 merged_attrs = {**old_attrs, **merged_attrs}
                 extras["source_chapter_ids"] = list(
                     set((extras.get("source_chapter_ids") or []) + ([source_chapter_id] if source_chapter_id else []))
                 )
+                old_aliases = _aliases_from_db(row["aliases"])
+                merged_aliases = _merge_aliases(old_aliases, new_aliases)
+                old_description = (row["description"] or "").strip()
+                final_description = (
+                    new_description if len(new_description) >= len(old_description)
+                    else old_description
+                )
                 set_clauses = [
                     "name = ?", "attributes = ?", "extras = ?",
+                    "aliases = ?", "description = ?",
                     "source_chapter_id = COALESCE(?, source_chapter_id)",
                     "updated_at = CURRENT_TIMESTAMP",
                 ]
@@ -2592,6 +2723,8 @@ async def upsert_ai_kg_from_extraction(
                     str(loc.get("name", "")).strip()[:200] or entity_id,
                     _encode_attributes(merged_attrs),
                     _encode_extras(extras),
+                    _aliases_to_db(merged_aliases),
+                    final_description,
                     source_chapter_id,
                 ]
                 if loc.get("location_type"):
@@ -2607,6 +2740,7 @@ async def upsert_ai_kg_from_extraction(
                     "name": loc.get("name", ""), "attributes": merged_attrs,
                     "source_chapter_id": source_chapter_id, "extras": extras,
                     "location_type": loc.get("location_type"),
+                    "aliases": merged_aliases, "description": final_description,
                 })
             else:
                 if source_chapter_id:
@@ -2615,8 +2749,8 @@ async def upsert_ai_kg_from_extraction(
                     """
                     INSERT INTO ai_kg_locations
                         (project_id, entity_id, name, location_type, attributes,
-                         source_chapter_id, model_id, extras)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         source_chapter_id, model_id, extras, aliases, description)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id, entity_id,
@@ -2625,6 +2759,8 @@ async def upsert_ai_kg_from_extraction(
                         _encode_attributes(merged_attrs),
                         source_chapter_id, model_id,
                         _encode_extras(extras),
+                        _aliases_to_db(new_aliases),
+                        new_description,
                     ),
                 )
                 stored["locations"].append({
@@ -3253,6 +3389,9 @@ def _decode_kg_character_row(row: Any) -> Dict[str, Any]:
     d = dict(row)
     d["attributes"] = _decode_attributes(d.get("attributes"))
     d["extras"] = _decode_extras(d.get("extras"))
+    # RAG-lite: aliases + description 字段 (兼容旧列空值)
+    d["aliases"] = _aliases_from_db(d.get("aliases"))
+    d["description"] = (d.get("description") or "").strip()
     return d
 
 
@@ -3260,6 +3399,8 @@ def _decode_kg_event_row(row: Any) -> Dict[str, Any]:
     d = dict(row)
     d["attributes"] = _decode_attributes(d.get("attributes"))
     d["extras"] = _decode_extras(d.get("extras"))
+    d["aliases"] = _aliases_from_db(d.get("aliases"))
+    d["description"] = (d.get("description") or "").strip()
     return d
 
 
@@ -3267,6 +3408,8 @@ def _decode_kg_location_row(row: Any) -> Dict[str, Any]:
     d = dict(row)
     d["attributes"] = _decode_attributes(d.get("attributes"))
     d["extras"] = _decode_extras(d.get("extras"))
+    d["aliases"] = _aliases_from_db(d.get("aliases"))
+    d["description"] = (d.get("description") or "").strip()
     return d
 
 

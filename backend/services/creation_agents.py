@@ -13,8 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from services import ai_service, prompt_service
 
@@ -742,11 +743,42 @@ def serialize_kg_for_prompt(
                 meta.append(f"重要度={importance}")
             if meta:
                 line += f" ({'; '.join(meta)})"
+            # ⑥ aliases 顶层字段 (RAG-lite 改进: 别名直观可见)
+            aliases_top = c.get("aliases")
+            alias_list: List[str] = []
+            if isinstance(aliases_top, list):
+                alias_list.extend(x for x in aliases_top if x)
+            elif isinstance(aliases_top, str) and aliases_top.strip():
+                alias_list.append(aliases_top.strip())
+            if isinstance(attrs, dict):
+                for k in ("别名", "alias", "aliases", "字号", "绰号"):
+                    v = attrs.get(k)
+                    if isinstance(v, list):
+                        alias_list.extend(x for x in v if x)
+                    elif isinstance(v, str) and v.strip():
+                        alias_list.append(v.strip())
+            if alias_list:
+                # 去重, 保留原文顺序
+                seen = set()
+                uniq = []
+                for a in alias_list:
+                    if a and a not in seen:
+                        uniq.append(a); seen.add(a)
+                line += f" [别名: {'/'.join(uniq[:5])}]"
             if attrs:
-                # 取前 5 个属性
-                attr_items = list(attrs.items())[:5]
+                # 取前 5 个属性 (排除已作为别名展示过的 key, 避免重复)
+                skip_keys = {"别名", "alias", "aliases", "字号", "绰号", "description"}
+                attr_items = [
+                    (k, v) for k, v in attrs.items()
+                    if k not in skip_keys
+                ][:5]
                 attr_str = "; ".join(f"{k}={v}" for k, v in attr_items)
-                line += f" — {attr_str}"
+                if attr_str:
+                    line += f" — {attr_str}"
+            # ⑥ description 字段 (RAG-lite 改进: 1~2 句描述)
+            desc = c.get("description")
+            if isinstance(desc, str) and desc.strip():
+                line += f"\n  简介: {desc.strip()[:120]}"
             parts.append(line)
     if events:
         parts.append("\n## 关键事件 (按时间顺序)")
@@ -767,6 +799,10 @@ def serialize_kg_for_prompt(
                     meta.append(f"地点: {loc}")
             if meta:
                 line += f" 〔{'; '.join(meta)}〕"
+            # description (RAG-lite 改进)
+            desc = e.get("description")
+            if isinstance(desc, str) and desc.strip():
+                line += f"\n  简介: {desc.strip()[:120]}"
             parts.append(line)
     if locations:
         parts.append("\n## 已知地点")
@@ -783,6 +819,9 @@ def serialize_kg_for_prompt(
                 meta.append(f"控制: {ctrl}")
             if meta:
                 line += f" ({'; '.join(meta)})"
+            desc = l.get("description")
+            if isinstance(desc, str) and desc.strip():
+                line += f"\n  简介: {desc.strip()[:120]}"
             parts.append(line)
     if char_rels:
         parts.append("\n## 人物关系")
@@ -961,6 +1000,202 @@ def validate_extracted_relation(r: Dict[str, Any]) -> Tuple[Dict[str, Any], List
 
 
 # ---------------------------------------------------------------------------
+# 抽取后处理 (RAG-lite 改进, 纯规则, 不调 ML)
+# ---------------------------------------------------------------------------
+
+
+# 中文常见称谓前缀/后缀, 用于自动识别别名
+_TITLE_PREFIXES = (
+    "老", "小", "大", "阿",
+)
+_TITLE_SUFFIXES = (
+    "哥", "姐", "爷", "叔", "伯", "姨", "公", "婆",
+    "侠", "客", "老", "少", "主", "人", "子",
+)
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """基于字符集合的 Jaccard 相似度 (0~1). 不调 ML."""
+    if not a or not b:
+        return 0.0
+    sa, sb = set(a), set(b)
+    inter = sa & sb
+    union = sa | sb
+    char_jacc = len(inter) / len(union) if union else 0.0
+    # 长度差异越大扣分越多
+    len_diff = abs(len(a) - len(b)) / max(len(a), len(b))
+    return char_jacc * (1 - len_diff * 0.5)
+
+
+def _auto_extract_aliases(
+    chapter_text: str,
+    entities: List[Dict[str, Any]],
+    *,
+    similarity_threshold: float = 0.55,
+) -> List[str]:
+    """从章节正文中"无中生有"地找出可能的别名.
+
+    启发式:
+      ① 同姓同辈: 已知 "王大爷" → 扫描 "王" 开头 2-4 字短名 (王老板/王村长)
+      ② 称谓变换: 已知 "张三" → 扫描 "张三哥 / 三哥 / 小张"
+      ③ 简称/全称: 已知 "张三丰" → 扫描 "张三"
+    任何候选必须在正文里**真实出现**, 且与已有实体名 Jaccard ≥ 阈值.
+    """
+    if not chapter_text or not entities:
+        return []
+    found: List[str] = []
+    seen: Set[str] = set()
+    text_clean = chapter_text
+    for ent in entities:
+        name = (ent.get("name") or "").strip()
+        if not name or len(name) < 2:
+            continue
+        # 启发式 ①: 同姓短名
+        if len(name) >= 2:
+            surname = name[0]
+            # 扫描 "姓 + 1~3 字"
+            for m in re.finditer(rf"{re.escape(surname)}[\u4e00-\u9fa5]{{1,3}}", text_clean):
+                cand = m.group(0)
+                if cand == name or cand in seen:
+                    continue
+                sim = _name_similarity(cand, name)
+                if sim >= similarity_threshold:
+                    found.append(cand)
+                    seen.add(cand)
+        # 启发式 ②: 称谓变换
+        for sfx in _TITLE_SUFFIXES:
+            if name.endswith(sfx):
+                continue
+            cand = name + sfx
+            if cand in text_clean and cand != name:
+                if cand not in seen:
+                    found.append(cand)
+                    seen.add(cand)
+        # 启发式 ③: 简称
+        if len(name) >= 3:
+            for n in (2, 3):
+                short = name[-n:]  # 取末尾 n 字 (中文常见简写)
+                if short != name and short in text_clean and short not in seen:
+                    sim = _name_similarity(short, name)
+                    if sim >= 0.4:
+                        found.append(short)
+                        seen.add(short)
+    return found[:8]
+
+
+def _dedupe_within_chapter(
+    entities: List[Dict[str, Any]],
+    *,
+    similarity_threshold: float = 0.8,
+) -> List[List[str]]:
+    """同章节内合并相近实体名, 返回每组的"代表 entity_id"列表.
+
+    例: ["王大爷", "王大爷是村长", "老王大爷"] → 第一项代表, 后两项合并.
+    """
+    names = [(i, (e.get("name") or "").strip()) for i, e in enumerate(entities)]
+    parent = list(range(len(entities)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[ry] = rx
+
+    for i, (idx_i, n_i) in enumerate(names):
+        if not n_i or len(n_i) < 2:
+            continue
+        for j, (idx_j, n_j) in enumerate(names[i + 1:], start=i + 1):
+            if not n_j or len(n_j) < 2:
+                continue
+            # 短名完全包含在长名里 → 同实体
+            if n_i in n_j or n_j in n_i:
+                union(idx_i, idx_j)
+                continue
+            sim = _name_similarity(n_i, n_j)
+            if sim >= similarity_threshold:
+                union(idx_i, idx_j)
+
+    groups: Dict[int, List[int]] = defaultdict(list)
+    for i in range(len(entities)):
+        groups[find(i)].append(i)
+    # 返回每组的 entity_id 列表 (按原顺序)
+    return [
+        [entities[i].get("entity_id") or f"e{i}" for i in idxs]
+        for idxs in groups.values() if len(idxs) > 1
+    ]
+
+
+def post_process_extracted_kg(
+    extracted: "ExtractedKG",
+    chapter_text: str,
+) -> "ExtractedKG":
+    """RAG-lite 后处理: 自动补全 aliases + 合并同章节内重复实体.
+
+    调用方在拿到 LLM 输出后、调用 upsert_ai_kg_from_extraction 前调一次.
+    """
+    # 1) 自动补全人物的 aliases
+    for c in extracted.characters:
+        existing_aliases = set()
+        top = c.get("aliases")
+        if isinstance(top, list):
+            existing_aliases.update(str(x).strip() for x in top if x)
+        elif isinstance(top, str) and top.strip():
+            existing_aliases.add(top.strip())
+        attrs = c.get("attributes") or {}
+        if isinstance(attrs, dict):
+            for k in ("别名", "alias", "aliases", "字号", "绰号"):
+                v = attrs.get(k)
+                if isinstance(v, list):
+                    existing_aliases.update(str(x).strip() for x in v if x)
+                elif isinstance(v, str) and v.strip():
+                    existing_aliases.add(v.strip())
+
+        auto = _auto_extract_aliases(chapter_text, [c])
+        merged = []
+        seen = set()
+        for a in (existing_aliases, auto):
+            for x in a:
+                if x and x != c.get("name") and x not in seen:
+                    seen.add(x)
+                    merged.append(x)
+        if merged:
+            c["aliases"] = merged[:10]
+
+    # 2) 合并章节内重复人物 (仅提示警告, 不自动合并 entity_id, 避免误判)
+    dup_groups = _dedupe_within_chapter(extracted.characters)
+    for grp in dup_groups:
+        names = [
+            c.get("name") for c in extracted.characters
+            if (c.get("entity_id") or "").strip() in grp
+        ]
+        extracted.warnings.append(
+            f"⚠ 章节内人物疑似重复: {' / '.join(str(n) for n in names if n)}"
+        )
+
+    # 3) 事件 / 地点同样做轻量别名补充
+    for lst_key in ("events",):
+        for e in getattr(extracted, lst_key, []):
+            auto = _auto_extract_aliases(chapter_text, [e])
+            existing = set(e.get("aliases") or []) if isinstance(e.get("aliases"), list) else set()
+            merged = []
+            seen = set()
+            for a in (existing, auto):
+                for x in a:
+                    if x and x != e.get("name") and x not in seen:
+                        seen.add(x)
+                        merged.append(x)
+            if merged:
+                e["aliases"] = merged[:10]
+
+    return extracted
+
+
+# ---------------------------------------------------------------------------
 # ④⑥ EntityExtractor v2 — 含 locations + 结构化字段 + schema 校验
 # ---------------------------------------------------------------------------
 
@@ -1045,6 +1280,8 @@ class EntityExtractor:
         for c in (parsed.get("conflicts_in_text") or []):
             if isinstance(c, dict):
                 out.conflicts_in_text.append({k: str(v) for k, v in c.items()})
+        # RAG-lite 改进: 后处理自动补全 aliases + 同章节去重提示
+        post_process_extracted_kg(out, chapter_text)
         return out
 
 

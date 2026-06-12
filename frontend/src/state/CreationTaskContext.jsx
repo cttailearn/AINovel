@@ -137,7 +137,6 @@ export function CreationTaskProvider({ children }) {
           next.stage = 'start';
           next.chapter_id = data.chapter_id;
           next.variants = {};
-          next.mode = data.mode;
           next.max_revise = data.max_revise;
           next.score_threshold = data.score_threshold;
           next.attempts = 0;
@@ -240,7 +239,6 @@ export function CreationTaskProvider({ children }) {
       userIntent,
       chapterNo: cno,
       title: chapTitle,
-      mode = 'single',
       maxRevise = 2,
       scoreThreshold = 7.0,
       onProgress,
@@ -283,7 +281,6 @@ export function CreationTaskProvider({ children }) {
             user_intent: userIntent,
             title: chapTitle,
             chapter_no: cno,
-            mode,
             max_revise: maxRevise,
             score_threshold: scoreThreshold,
           },
