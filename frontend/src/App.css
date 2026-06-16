@@ -40,6 +40,11 @@
     'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular,
     Menlo, Consolas, monospace;
+
+  /* 修复 #34: 主题切换过渡变量. 200ms 是"立即感到但不至于分神"的甜点. */
+  --theme-transition: background-color 200ms ease,
+                     color 200ms ease,
+                     border-color 200ms ease;
 }
 
 [data-theme="dark"] {
@@ -75,11 +80,13 @@
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* 修复 #34: 主题切换平滑过渡. 只过渡颜色属性, 不动 transform/layout. */
+  transition: var(--theme-transition);
   background: var(--background);
   color: var(--text-primary);
   min-height: 100vh;
   line-height: 1.6;
-  transition: background 0.3s ease, color 0.3s ease;
+  /* 修复 #34: 颜色过渡由 --theme-transition 控制, 移除硬编码 */
 }
 
 .app-container {
@@ -4519,9 +4526,11 @@ input:checked + .slider:before {
 .rail-sidebar {
   display: flex;
   flex-direction: column;
-  width: 220px;
+  width: 208px;
   flex-shrink: 0;
-  background: var(--card-bg);
+  padding: 10px 10px 12px;
+  gap: 10px;
+  background: var(--background);
   border-right: 1px solid var(--border);
   position: sticky;
   top: 0;
@@ -4533,8 +4542,10 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 1.25rem 1.25rem 1.25rem;
-  border-bottom: 1px solid var(--border);
+  padding: 1rem 1rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card-bg);
 }
 
 .rail-brand-mark {
@@ -4572,11 +4583,14 @@ input:checked + .slider:before {
 .rail-nav {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 0.75rem 0.6rem;
+  gap: 0.25rem;
+  padding: 0.7rem 0.5rem;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card-bg);
 }
 
 .rail-nav-label {
@@ -4593,22 +4607,38 @@ input:checked + .slider:before {
   align-items: center;
   gap: 0.6rem;
   width: 100%;
-  padding: 0.55rem 0.65rem;
+  min-height: 40px;
+  padding: 0.62rem 0.75rem;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--radius);
+  border-radius: 10px;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   position: relative;
   font-size: 0.875rem;
   font-weight: 500;
   text-align: left;
 }
 
+.rail-btn::before {
+  content: "";
+  position: absolute;
+  left: 0.45rem;
+  top: 50%;
+  width: 3px;
+  height: 18px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0;
+  transform: translateY(-50%) scaleY(0.5);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
 .rail-btn:hover {
   background: var(--hover);
   color: var(--text-primary);
+  border-color: var(--border);
 }
 
 .rail-btn.active {
@@ -4616,8 +4646,21 @@ input:checked + .slider:before {
   color: var(--card-bg);
 }
 
+.rail-btn.active::before {
+  opacity: 1;
+  transform: translateY(-50%) scaleY(1);
+  background: var(--card-bg);
+}
+
 .rail-btn.active .rail-btn-icon {
   color: var(--card-bg);
+}
+
+.rail-btn > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rail-btn-icon {
@@ -4650,8 +4693,10 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.75rem 0.75rem;
-  border-top: 1px solid var(--border);
+  padding: 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card-bg);
 }
 
 .rail-footer .rail-btn {
@@ -4678,7 +4723,7 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 1rem;
-  padding: 0.85rem 1.75rem;
+  padding: 0.9rem 1.25rem;
   background: var(--background);
   border-bottom: 1px solid var(--border);
 }
@@ -4707,9 +4752,60 @@ input:checked + .slider:before {
   display: block;
 }
 
+/* 顶栏面包屑 (进入创作项目时: "AI 小说创作 / 项目名") */
+.rail-topbar-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 1.05rem;
+}
+
+.rail-topbar-crumb-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s ease, background 0.15s ease;
+  white-space: nowrap;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-topbar-crumb-link:hover {
+  color: var(--text-primary);
+  background: var(--hover);
+}
+
+.rail-topbar-crumb-sep {
+  color: var(--text-tertiary);
+  font-size: 1rem;
+  font-weight: 400;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.rail-topbar-crumb-current {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
 .rail-topbar-search {
   flex: 1;
-  max-width: 360px;
+  max-width: 420px;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -4789,8 +4885,9 @@ input:checked + .slider:before {
 .rail-body.rail-body-creation {
   max-width: none;
   width: 100%;
-  padding: 0;
+  padding: 12px;
   margin: 0;
+  min-height: 0;
 }
 
 .settings-page {

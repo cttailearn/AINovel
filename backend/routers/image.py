@@ -12,7 +12,9 @@ import logging
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
+from config import IMAGE_CACHE_DIR
 from schemas import (
     ImageGenerationRequest,
     ImageGenerationResponse,
@@ -26,6 +28,7 @@ from services import (
 )
 from services.image_service import (
     ImageGenerationError,
+    cache_image_bytes,
     upload_reference_image,
 )
 
@@ -141,8 +144,25 @@ async def upload_reference(file: UploadFile = File(...)):
             detail=f"图片过大 ({len(data)} 字节)，上限 10MB",
         )
     data_uri = await upload_reference_image(data, content_type=content_type)
+    filename = await cache_image_bytes(
+        data,
+        content_type=content_type,
+        source_name=file.filename,
+    )
     return {
         "data_uri": data_uri,
+        "url": f"/api/image/cache/{filename}",
         "size": len(data),
         "content_type": content_type,
     }
+
+
+@router.get("/cache/{filename}")
+async def get_cached_image(filename: str):
+    path = (IMAGE_CACHE_DIR / filename).resolve()
+    cache_root = IMAGE_CACHE_DIR.resolve()
+    if cache_root not in path.parents:
+        raise HTTPException(status_code=400, detail="非法文件路径")
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="缓存文件不存在")
+    return FileResponse(path)

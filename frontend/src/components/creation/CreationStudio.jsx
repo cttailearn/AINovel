@@ -10,7 +10,7 @@ import { useConfirm } from '../../hooks/ConfirmProvider.jsx';
 import { ProjectForm } from './ProjectForm.jsx';
 import { ProjectIntakeWizard } from './ProjectIntakeWizard.jsx';
 import { ChapterGenerator } from './ChapterGenerator.jsx';
-import { VariantCards } from './VariantCards.jsx';
+import { VariantTabs } from './VariantTabs.jsx';
 import { VariantEditor } from './VariantEditor.jsx';
 import { ProjectKGPreview } from './ProjectKGPreview.jsx';
 import { KGGraphView } from './KGGraphView.jsx';
@@ -97,7 +97,36 @@ function formatDateTime(iso) {
 // ============================================================
 // 主组件
 // ============================================================
-export function CreationStudio({ models = [], topSearch = '' }) {
+function buildImportedNovelPayload(novel) {
+  const chapters = Array.isArray(novel?.chapters) ? novel.chapters : [];
+  const chapterLines = chapters.slice(0, 30).map(
+    (ch) => `第${ch.chapter_number}章 ${ch.title || '未命名章节'}`,
+  );
+  const summary = novel?.summary ? `作品摘要：${novel.summary}` : '';
+  const outline = [
+    `这是从已存在小说《${novel?.title || '未命名小说'}》导入的续写项目。`,
+    summary,
+    chapterLines.length ? `已有章节：\n${chapterLines.join('\n')}` : '',
+    '请在此基础上继续创作后续章节，并保持人物、事件和世界观一致。',
+  ].filter(Boolean).join('\n\n');
+  return {
+    title: `${novel?.title || '未命名小说'}·续写`,
+    genre: '',
+    worldview: `导入来源：《${novel?.title || '未命名小说'}》`,
+    outline,
+    initial_concepts: [],
+    style_pref: {},
+  };
+}
+
+export function CreationStudio({
+  models = [],
+  routeProjectId = null,
+  importNovelId = null,
+  onProjectRouteChange,
+  onImportNovelHandled,
+  onHeaderContextChange,
+}) {
   const toast = useToast();
   const creationTask = useCreationTask();
   const confirmDialog = useConfirm();
@@ -105,7 +134,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   const [projectsLoading, setProjectsLoading] = useState(true);
   // 从 localStorage 恢复最近一次打开的项目 — 配合 CreationTaskContext, 刷
   // 新页面后能直接续上项目 + 后台任务进度.
-  const [activeProjectId, setActiveProjectIdState] = useState(() => readActiveProject());
+  const [activeProjectId, setActiveProjectIdState] = useState(() => routeProjectId ?? readActiveProject());
   const setActiveProjectId = useCallback((id) => {
     writeActiveProject(id);
     setActiveProjectIdState(id);
@@ -131,6 +160,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   );
   const genProgress =
     creationTask.projectId === activeProjectId ? creationTask.genProgress : null;
+  const syncWarning = creationTask.mirrorWarning || '';
 
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -141,17 +171,18 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   const [chapterGenError, setChapterGenError] = useState(null);
 
   const [kgRefreshKey, setKgRefreshKey] = useState(0);
+  const [importNovel, setImportNovel] = useState(null);
+  const [importNovelLoading, setImportNovelLoading] = useState(false);
+  const [importingNovel, setImportingNovel] = useState(false);
 
-  // 过滤项目列表 (按 topSearch)
-  const filteredProjects = useMemo(() => {
-    if (!topSearch.trim()) return projects;
-    const q = topSearch.toLowerCase();
-    return projects.filter((p) =>
-      (p.title || '').toLowerCase().includes(q) ||
-      (p.genre || '').toLowerCase().includes(q) ||
-      (p.outline || '').toLowerCase().includes(q)
-    );
-  }, [projects, topSearch]);
+  useEffect(() => {
+    if (routeProjectId == null) return;
+    setActiveProjectId(routeProjectId);
+  }, [routeProjectId, setActiveProjectId]);
+
+  useEffect(() => {
+    onProjectRouteChange?.(activeProjectId);
+  }, [activeProjectId, onProjectRouteChange]);
 
   // ---- 项目列表 ----
   const loadProjects = useCallback(async () => {
@@ -197,6 +228,25 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     loadProjectDetail(activeProjectId);
   }, [activeProjectId, loadProjectDetail]);
 
+  // 进入 / 离开某个创作项目时, 同步更新 App 顶栏标题:
+  // - 进入项目: 顶栏变成 "AI 小说创作 / 项目名" 面包屑
+  // - 离开项目 (回到项目列表 / 新建 / 导入): 顶栏恢复成普通页面标题
+  useEffect(() => {
+    if (!onHeaderContextChange) return undefined;
+    if (activeProjectId && projectDetail?.project?.title) {
+      onHeaderContextChange({
+        parent: 'AI 小说创作',
+        title: projectDetail.project.title,
+      });
+    } else {
+      onHeaderContextChange(null);
+    }
+    return () => {
+      // 卸载时清掉, 避免切到其它页面还残留创作项目名
+      onHeaderContextChange(null);
+    };
+  }, [activeProjectId, projectDetail?.project?.title, onHeaderContextChange]);
+
   // ---- 章节详情 ----
   const loadChapterDetail = useCallback(async (chId) => {
     if (!chId) { setChapterDetail(null); return; }
@@ -216,6 +266,38 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     loadChapterDetail(activeChapterId);
   }, [activeChapterId, loadChapterDetail]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!importNovelId) {
+      setImportNovel(null);
+      return undefined;
+    }
+    setImportNovelLoading(true);
+    api.novels.detail(importNovelId)
+      .then((data) => {
+        if (!cancelled) setImportNovel(data);
+      })
+      .catch(() => {
+        if (!cancelled) setImportNovel(null);
+      })
+      .finally(() => {
+        if (!cancelled) setImportNovelLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [importNovelId]);
+
+  const handleProjectKnowledgeChanged = useCallback(async () => {
+    setKgRefreshKey((k) => k + 1);
+    if (activeProjectId) {
+      await loadProjectDetail(activeProjectId);
+    }
+    if (activeChapterId) {
+      await loadChapterDetail(activeChapterId);
+    }
+  }, [activeChapterId, activeProjectId, loadChapterDetail, loadProjectDetail]);
+
   // ---- 项目 CRUD ----
   const handleCreateProject = async (payload) => {
     setSubmittingProject(true);
@@ -229,6 +311,22 @@ export function CreationStudio({ models = [], topSearch = '' }) {
       toast.error(e instanceof ApiError ? e.message : '创建失败');
     } finally {
       setSubmittingProject(false);
+    }
+  };
+
+  const handleCreateFromNovel = async () => {
+    if (!importNovel) return;
+    setImportingNovel(true);
+    try {
+      const res = await api.creation.createProject(buildImportedNovelPayload(importNovel));
+      toast.success(`已从《${importNovel.title}》创建续写项目`);
+      await loadProjects();
+      setActiveProjectId(res.id);
+      onImportNovelHandled?.();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : '导入失败');
+    } finally {
+      setImportingNovel(false);
     }
   };
 
@@ -277,7 +375,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     try {
       const r = await api.creation.seedKG(activeProjectId);
       toast.success(`已灌入 ${r.characters || 0} 个人物到知识图谱`);
-      setKgRefreshKey((k) => k + 1);
+      await handleProjectKnowledgeChanged();
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : '灌入失败');
     }
@@ -295,7 +393,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     try {
       await api.creation.clearKG(activeProjectId);
       toast.success('已清空');
-      setKgRefreshKey((k) => k + 1);
+      await handleProjectKnowledgeChanged();
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : '清空失败');
     }
@@ -306,7 +404,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
   // 把 UI 侧的事件 (e.g. 自动同步章节 title) 转译给 context. 任务的"持久化 /
   // 跨连接取消 / 刷新后重连"由 context 层统一处理.
   const handleGenerate = useCallback(
-    ({ user_intent, title, chapter_no }) => {
+    ({ user_intent, title, chapter_no, force = false }) => {
       if (!activeProjectId) return;
       // UX-#2: 记录本次参数, 失败时给 retry 用
       setLastAttempt({ user_intent, title, chapter_no });
@@ -317,6 +415,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
         userIntent: user_intent,
         chapterNo: chapter_no,
         title,
+        force,
         // 单候选 + Critic 循环: Critic 评分不达标自动回到 Planner + Writer
         // 改写, 最多重试 2 轮 (含首次共 3 次尝试), 综合分 >= 7.0 视为通过.
         maxRevise: 2,
@@ -403,20 +502,20 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     }
   };
 
-  const handleConfirmChapter = async () => {
+  const handleConfirmChapter = useCallback(async () => {
     if (!activeChapterId) return;
     setConfirming(true);
     try {
       await api.creation.confirmChapter(activeChapterId);
       toast.success('已确认, 知识图谱已更新');
       await loadChapterDetail(activeChapterId);
-      setKgRefreshKey((k) => k + 1);
+      await handleProjectKnowledgeChanged();
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : '确认失败');
     } finally {
       setConfirming(false);
     }
-  };
+  }, [activeChapterId, handleProjectKnowledgeChanged, loadChapterDetail, toast]);
 
   // ---- 章节管理 (导出 / 删除 / 重新生成) ----
   const handleExportChapter = (chapter) => {
@@ -530,9 +629,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
         chapter_no: idx + 1,
       }));
       // 后端批量更新 endpoint
-      await apiRequest(`/creation/projects/${activeProjectId}/chapters/reorder`, {
-        method: 'POST', body: { orders: updates },
-      });
+      await api.creation.reorderChapters(activeProjectId, updates);
       await loadProjectDetail(activeProjectId);
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : '重排失败, 已恢复');
@@ -547,6 +644,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
     return (
       <div className="creation-studio">
         <div className="creation-main-section">
+          {syncWarning && <div className="creation-import-banner">{syncWarning}</div>}
           <h2>新建创作项目</h2>
           <ProjectIntakeWizard
             models={models}
@@ -561,18 +659,58 @@ export function CreationStudio({ models = [], topSearch = '' }) {
 
   if (!activeProjectId || !projectDetail) {
     return (
-      <ProjectListView
-        projects={filteredProjects}
-        loading={projectsLoading}
-        onSelectProject={(id) => { setActiveProjectId(id); setRegenOf(null); }}
-        onCreateNew={() => setCreatingProject(true)}
-      />
+      <>
+        {syncWarning && <div className="creation-import-banner">{syncWarning}</div>}
+        {importNovelId && (
+          <div className="creation-import-banner">
+            <div>
+              <strong>
+                {importNovelLoading
+                  ? '正在读取小说内容...'
+                  : importNovel
+                    ? `已选择从《${importNovel.title}》导入前情提要`
+                    : '未找到可导入的小说'}
+              </strong>
+              {importNovel && (
+                <div className="muted small">
+                  将根据小说摘要与章节目录自动创建一个“续写项目”，用于继续生成后续章节。
+                </div>
+              )}
+            </div>
+            <div className="creation-actions-row">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onImportNovelHandled?.()}
+                disabled={importNovelLoading || importingNovel}
+              >
+                取消导入
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleCreateFromNovel}
+                disabled={!importNovel || importNovelLoading || importingNovel}
+              >
+                {importingNovel ? '创建中...' : '创建续写项目'}
+              </button>
+            </div>
+          </div>
+        )}
+        <ProjectListView
+          projects={projects}
+          loading={projectsLoading}
+          onSelectProject={(id) => { setActiveProjectId(id); setRegenOf(null); }}
+          onCreateNew={() => setCreatingProject(true)}
+        />
+      </>
     );
   }
 
   // 在所有分支的 return 之前, 也需要让 dialog 可以挂载
   return (
     <>
+      {syncWarning && <div className="creation-import-banner">{syncWarning}</div>}
       <NotionWorkspace
         activeProjectId={activeProjectId}
         onSelectProject={(id) => { setActiveProjectId(id); setRegenOf(null); }}
@@ -596,6 +734,7 @@ export function CreationStudio({ models = [], topSearch = '' }) {
         regenOf={regenOf}
         setRegenOf={setRegenOf}
         kgRefreshKey={kgRefreshKey}
+        handleProjectKnowledgeChanged={handleProjectKnowledgeChanged}
         editingProject={editingProject}
         submittingProject={submittingProject}
         setEditingProject={setEditingProject}
@@ -736,7 +875,7 @@ function NotionWorkspace(props) {
     onSelectProject, onCreateNew, onBackToProjects,
     projectDetail, chapterDetail, chapterLoading,
     generating, genProgress, saving, confirming, deleting, regenOf, setRegenOf,
-    kgRefreshKey, editingProject, submittingProject, setEditingProject,
+    kgRefreshKey, handleProjectKnowledgeChanged, editingProject, submittingProject, setEditingProject,
     handleUpdateProject, handleDeleteProject, handleSeedKG, handleClearKG,
     setActiveChapterId, handleGenerate, handleSelectVariant, handleEditVariant,
     handleSaveContent, handleConfirmChapter, handleExportChapter,
@@ -971,6 +1110,7 @@ function NotionWorkspace(props) {
                 handleSeedKG={handleSeedKG}
                 handleClearKG={handleClearKG}
                 hasConcepts={hasConcepts}
+                onKnowledgeGraphChange={handleProjectKnowledgeChanged}
                 onToggle={() => setReferenceOpen((v) => !v)}
                 threads={projectDetail.plot_threads || []}
                 locations={projectDetail.locations || []}
@@ -1414,7 +1554,7 @@ function CanvasPane({
               lastError={chapterGenError}
               onRetry={(params) => { handleGenerate(params); setRegenOf(null); }}
               onGenerate={({ user_intent, title, chapter_no }) => {
-                handleGenerate({ user_intent, title, chapter_no });
+                handleGenerate({ user_intent, title, chapter_no, force: true });
                 setRegenOf(null);
               }}
               onCancelRegen={() => setRegenOf(null)}
@@ -1447,7 +1587,7 @@ function CanvasPane({
               confirming={confirming}
             />
           ) : (
-            <VariantCards
+            <VariantTabs
               variants={chapterDetail.variants || []}
               selectedId={chapterDetail.selected_variant_id}
               onSelect={handleSelectVariant}
@@ -1468,6 +1608,7 @@ function ReferencePane({
   open, project, kgStats, kgRefreshKey,
   editingProject, setEditingProject, submittingProject,
   handleUpdateProject, handleSeedKG, handleClearKG, hasConcepts, onToggle,
+  onKnowledgeGraphChange,
   threads = [], locations = [], themesProgress = [],
   kgChars = [], kgEvents = [], kgLocations = [],
   kgCharRels = [], kgCharEventRels = [], kgEventRels = [],
@@ -1537,7 +1678,7 @@ function ReferencePane({
           <PlotThreadsPanel
             projectId={project.id}
             refreshKey={kgRefreshKey}
-            onChange={() => { setKgRefreshKey((k) => k + 1); loadProjectDetail(project.id); }}
+            onChange={() => { onKnowledgeGraphChange?.(); }}
           />
         </section>
 
@@ -1618,10 +1759,7 @@ function ReferencePane({
           <ProjectKGPreview
             projectId={project.id}
             refreshKey={kgRefreshKey}
-            onChange={() => {
-              setKgRefreshKey((k) => k + 1);
-              loadProjectDetail(project.id);
-            }}
+            onChange={() => { onKnowledgeGraphChange?.(); }}
           />
         </section>
 

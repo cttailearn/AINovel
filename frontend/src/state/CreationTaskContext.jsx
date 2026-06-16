@@ -8,25 +8,20 @@ import {
   useState,
 } from 'react';
 import { ApiError, api, getEventStream } from '../api/client.js';
+import { useTaskPersist } from '../hooks/useTaskPersist.js';
+import { getOrCreateClientId } from '../utils/clientId.js';
 
 const CreationTaskContext = createContext(null);
 
-const STORAGE_KEY = 'ainovel.creation.task.v1';
-// UX-#11: 跨设备/重装恢复 — 用一个稳定的 client_id 关联
-const CLIENT_ID_KEY = 'ainovel.client.id.v1';
+// 修复 #23: 拆分为 3 个独立 Context, 减少无谓 re-render.
+// - CreationTaskProgressContext  : 每帧都可能变的进度 (running/progress/lastEvent/errorMessage/startTime/version)
+// - CreationTaskIdentityContext : 启动后基本不变的身份 (taskId/projectId/projectTitle/chapterNo/mirrorWarning)
+// - CreationTaskControlContext  : 行为回调 (startGeneration/cancel/reset), 仅在 useCallback 重生成时变化
+const CreationTaskProgressContext = createContext(null);
+const CreationTaskIdentityContext = createContext(null);
+const CreationTaskControlContext = createContext(null);
 
-function getOrCreateClientId() {
-  if (typeof window === 'undefined') return null;
-  let id = null;
-  try {
-    id = window.localStorage.getItem(CLIENT_ID_KEY);
-    if (!id) {
-      id = `cli_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-      window.localStorage.setItem(CLIENT_ID_KEY, id);
-    }
-  } catch { /* noop */ }
-  return id;
-}
+const STORAGE_KEY = 'ainovel.creation.task.v1';
 
 function readPersisted() {
   if (typeof window === 'undefined') return null;
@@ -39,17 +34,6 @@ function readPersisted() {
   } catch {
     return null;
   }
-}
-
-function writePersisted(snapshot) {
-  if (typeof window === 'undefined') return;
-  try {
-    if (snapshot == null) {
-      window.localStorage.removeItem(STORAGE_KEY);
-    } else {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
-    }
-  } catch { /* noop */ }
 }
 
 /**
@@ -80,19 +64,16 @@ export function CreationTaskProvider({ children }) {
 
   const controllerRef = useRef(null);
   const isMountedRef = useRef(true);
+  const clientId = useMemo(() => getOrCreateClientId(), []);
 
   useEffect(() => {
     isMountedRef.current = true;
     return () => { isMountedRef.current = false; };
   }, []);
 
-  // 持久化
-  useEffect(() => {
-    if (!running && !lastEvent) {
-      writePersisted(null);
-      return;
-    }
-    const snapshot = {
+  const persistedSnapshot = useMemo(() => {
+    if (!running && !lastEvent) return null;
+    return {
       taskId,
       running,
       projectId,
@@ -103,23 +84,44 @@ export function CreationTaskProvider({ children }) {
       errorMessage,
       startTime,
     };
-    writePersisted(snapshot);
-    // UX-#11: 同时镜像到后端, 跨设备/重装可恢复
-    const clientId = getOrCreateClientId();
-    if (clientId) {
-      api.tasks.putMirror(clientId, snapshot).catch(() => { /* 静默失败, 仍走 localStorage */ });
-    }
   }, [
-    taskId,
-    running,
-    projectId,
-    projectTitle,
     chapterNo,
+    errorMessage,
     genProgress,
     lastEvent,
-    errorMessage,
+    projectId,
+    projectTitle,
+    running,
     startTime,
+    taskId,
   ]);
+
+  const applyExternalSnapshot = useCallback((snapshot) => {
+    if (!snapshot || typeof snapshot !== 'object') return;
+    if (snapshot.taskId && controllerRef.current && snapshot.taskId === taskId) return;
+    setTaskId(snapshot.taskId || null);
+    setRunning(Boolean(snapshot.running));
+    setProjectId(snapshot.projectId || null);
+    setProjectTitle(snapshot.projectTitle || '');
+    setChapterNo(snapshot.chapterNo || null);
+    setGenProgress(snapshot.genProgress || null);
+    setLastEvent(snapshot.lastEvent || null);
+    setErrorMessage(snapshot.errorMessage || '');
+    setStartTime(snapshot.startTime || null);
+  }, [taskId]);
+
+  const { mirrorWarning, restoreMirror } = useTaskPersist({
+    storageKey: STORAGE_KEY,
+    snapshot: persistedSnapshot,
+    onExternalSnapshot: applyExternalSnapshot,
+    mirror: clientId
+      ? {
+          clientId,
+          put: (id, snap) => api.tasks.putMirror(id, snap),
+          get: (id) => api.tasks.getMirror(id),
+        }
+      : null,
+  });
 
   // 处理业务事件, 维护 genProgress
   const handleEvent = useCallback((payload) => {
@@ -239,6 +241,7 @@ export function CreationTaskProvider({ children }) {
       userIntent,
       chapterNo: cno,
       title: chapTitle,
+      force = false,
       maxRevise = 2,
       scoreThreshold = 7.0,
       onProgress,
@@ -281,6 +284,7 @@ export function CreationTaskProvider({ children }) {
             user_intent: userIntent,
             title: chapTitle,
             chapter_no: cno,
+            force,
             max_revise: maxRevise,
             score_threshold: scoreThreshold,
           },
@@ -324,7 +328,6 @@ export function CreationTaskProvider({ children }) {
     setLastEvent(null);
     setErrorMessage('');
     setStartTime(null);
-    writePersisted(null);
   }, []);
 
   // mount 时尝试重连
@@ -333,24 +336,10 @@ export function CreationTaskProvider({ children }) {
     let cancelled = false;
     let activeController = null;
     // UX-#11: 优先尝试后端镜像, localStorage 没数据时也能恢复
-    const clientId = getOrCreateClientId();
-    if (clientId) {
-      api.tasks.getMirror(clientId).then((res) => {
-        if (cancelled) return;
-        if (res && res.snapshot && res.snapshot.taskId
-            && res.snapshot.taskId !== taskId) {
-          setTaskId(res.snapshot.taskId);
-          setRunning(!!res.snapshot.running);
-          setProjectId(res.snapshot.projectId || null);
-          setProjectTitle(res.snapshot.projectTitle || '');
-          setChapterNo(res.snapshot.chapterNo || null);
-          setGenProgress(res.snapshot.genProgress || null);
-          setLastEvent(res.snapshot.lastEvent || 'start');
-          setErrorMessage(res.snapshot.errorMessage || '');
-          setStartTime(res.snapshot.startTime || null);
-        }
-      }).catch(() => { /* 静默 */ });
-    }
+    restoreMirror().then((snap) => {
+      if (cancelled || !snap || !snap.taskId || snap.taskId === taskId) return;
+      applyExternalSnapshot(snap);
+    });
     (async () => {
       try {
         const rec = await api.tasks.get(taskId);
@@ -386,13 +375,11 @@ export function CreationTaskProvider({ children }) {
             setRunning(false);
           }
         } else {
-          writePersisted(null);
           setTaskId(null);
         }
       } catch (err) {
         if (cancelled) return;
         if (err && err.status === 404) {
-          writePersisted(null);
           setTaskId(null);
         }
       }
@@ -404,7 +391,7 @@ export function CreationTaskProvider({ children }) {
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId]);
+  }, [applyExternalSnapshot, restoreMirror, taskId]);
 
   const value = useMemo(
     () => ({
@@ -416,6 +403,7 @@ export function CreationTaskProvider({ children }) {
       genProgress,
       lastEvent,
       errorMessage,
+      mirrorWarning,
       startTime,
       version,
       startGeneration,
@@ -424,14 +412,42 @@ export function CreationTaskProvider({ children }) {
     }),
     [
       taskId, running, projectId, projectTitle, chapterNo,
-      genProgress, lastEvent, errorMessage, startTime, version,
+      genProgress, lastEvent, errorMessage, mirrorWarning, startTime, version,
       startGeneration, cancel, reset,
     ]
   );
 
+  // 修复 #23: progress / identity / control 三路独立 Provider.
+  // 旧 ``useCreationTask`` 行为不变, 仍返回合并对象; 新 selector hook 见文末.
+  const progressValue = useMemo(
+    () => ({
+      running,
+      genProgress,
+      lastEvent,
+      errorMessage,
+      startTime,
+      version,
+    }),
+    [running, genProgress, lastEvent, errorMessage, startTime, version]
+  );
+  const identityValue = useMemo(
+    () => ({ taskId, projectId, projectTitle, chapterNo, mirrorWarning }),
+    [taskId, projectId, projectTitle, chapterNo, mirrorWarning]
+  );
+  const controlValue = useMemo(
+    () => ({ startGeneration, cancel, reset }),
+    [startGeneration, cancel, reset]
+  );
+
   return (
     <CreationTaskContext.Provider value={value}>
-      {children}
+      <CreationTaskProgressContext.Provider value={progressValue}>
+        <CreationTaskIdentityContext.Provider value={identityValue}>
+          <CreationTaskControlContext.Provider value={controlValue}>
+            {children}
+          </CreationTaskControlContext.Provider>
+        </CreationTaskIdentityContext.Provider>
+      </CreationTaskProgressContext.Provider>
     </CreationTaskContext.Provider>
   );
 }
@@ -442,4 +458,27 @@ export function useCreationTask() {
     throw new Error('useCreationTask must be used inside CreationTaskProvider');
   }
   return ctx;
+}
+
+// 修复 #23: 细粒度 selector hook, 组件可以只订阅自己关心的字段.
+function _orThrow(ctx, hookName) {
+  if (!ctx) {
+    throw new Error(`${hookName} must be used inside CreationTaskProvider`);
+  }
+  return ctx;
+}
+
+/** 只订阅"进度"相关字段, 每帧变化时 re-render. */
+export function useTaskProgress() {
+  return _orThrow(useContext(CreationTaskProgressContext), 'useTaskProgress');
+}
+
+/** 只订阅"任务身份"相关字段, 通常只在 startGeneration / 重连时变化. */
+export function useTaskIdentity() {
+  return _orThrow(useContext(CreationTaskIdentityContext), 'useTaskIdentity');
+}
+
+/** 只订阅"行为控制"回调, 引用稳定 (useCallback). */
+export function useTaskControl() {
+  return _orThrow(useContext(CreationTaskControlContext), 'useTaskControl');
 }

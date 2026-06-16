@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { alignParagraphs } from '../../utils/paragraphDiff.js';
+import { alignParagraphs, alignParagraphsFromSegments } from '../../utils/paragraphDiff.js';
 
 /**
  * 合并阅读视图: 原文段 / 改写段 交替呈现, 配对的段叠在一起展示.
@@ -10,8 +10,13 @@ import { alignParagraphs } from '../../utils/paragraphDiff.js';
  * - 'orig_only' 段: 只显示原文 (灰色)
  * - 'rwt_only' 段: 只显示改写 (绿色高亮, 表示"AI 新增")
  */
-export function MergedReader({ original = '', rewrite = '' }) {
-  const pairs = useMemo(() => alignParagraphs(original, rewrite), [original, rewrite]);
+export function MergedReader({ original = '', rewrite = '', diffSegments = null }) {
+  const pairs = useMemo(() => {
+    if (Array.isArray(diffSegments) && diffSegments.length > 0) {
+      return alignParagraphsFromSegments(diffSegments);
+    }
+    return alignParagraphs(original, rewrite);
+  }, [diffSegments, original, rewrite]);
 
   if (pairs.length === 0) {
     return (

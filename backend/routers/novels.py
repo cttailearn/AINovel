@@ -216,10 +216,34 @@ async def get_raw_content_endpoint(
 
 
 @router.get("/{novel_id}/knowledge-graph")
-async def get_knowledge_graph_endpoint(novel_id: int):
+async def get_knowledge_graph_endpoint(
+    novel_id: int,
+    kg_system: Optional[str] = Query(
+        default=None,
+        description="KG 系统: novel (默认, 兼容旧接口) | ai (项目级, 推荐).",
+    ),
+):
+    """返回指定小说的知识图谱.
+
+    修复 #3: 即使当前只走物理 novels 级 KG, 响应里也额外返回
+    ``kg_system`` 与 (若为 ``novel``) ``deprecated_notice``, 方便前端识别
+    老接口、渐进迁移到 ``ai_kg_*``.
+    """
     if not await get_novel_detail(novel_id):
         raise HTTPException(status_code=404, detail="小说不存在")
-    return await list_knowledge_graph(novel_id)
+    from db.kg import (
+        DEPRECATED_NOTICE,
+        KgSystem,
+        is_deprecated_novel_kg,
+        kg_system_from_request,
+    )
+
+    chosen = kg_system_from_request(kg_system, default=KgSystem.NOVEL)
+    payload = await list_knowledge_graph(novel_id)
+    payload["kg_system"] = chosen.value
+    if is_deprecated_novel_kg(chosen):
+        payload["deprecated_notice"] = DEPRECATED_NOTICE
+    return payload
 
 
 @router.delete("/{novel_id}/knowledge-graph")

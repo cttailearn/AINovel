@@ -39,7 +39,12 @@ async def _isolate_storage(temp_workspace, monkeypatch) -> AsyncIterator[None]:
     monkeypatch.setattr("database.DATABASE_PATH", db_path)
     monkeypatch.setattr("services.novel_service.NOVELS_DIR", novels_dir)
     novels_dir.mkdir(parents=True, exist_ok=True)
-    from database import init_db
+    from database import close_db, init_db
 
+    # 修复 #1 后拆包: 必须先 close 旧共享连接, 再 init_db, 否则新路径下的
+    # 表会被旧连接的 schema 缓存"幻觉"沿用. open_db 现在内部对比路径,
+    # close_db 之后下次 open_db 一定会 reopen 到 patch 后的 db_path.
+    await close_db()
     await init_db()
     yield
+    await close_db()

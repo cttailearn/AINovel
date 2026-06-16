@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { NavLink, useSearchParams } from 'react-router-dom';
 import { ApiError, api } from './api/client.js';
 import { useToast } from './components/Toast/ToastProvider.jsx';
 import { ModelConfigPanel } from './components/ModelConfigPanel.jsx';
@@ -12,6 +13,7 @@ import { CreationStudio } from './components/creation/CreationStudio.jsx';
 import { ConfirmProvider } from './hooks/ConfirmProvider.jsx';
 import { ConnectionProvider, useConnection } from './state/ConnectionContext.jsx';
 import { useTheme } from './ThemeContext.jsx';
+import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import './App.css';
 
 function BackendStatus({ refreshAll }) {
@@ -139,11 +141,43 @@ function AppShell() {
   const toast = useToast();
   const { reset: resetEnrichmentTask } = useEnrichmentTask();
   const conn = useConnection();
-  const [activeNav, setActiveNav] = useState('workbench');
-  const [settingsTab, setSettingsTab] = useState('models');
+  const [searchParams, setSearchParams] = useSearchParams();
   const [models, setModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(true);
-  const [topSearch, setTopSearch] = useState('');
+  // 子页面 (创作工作区) 可通过此回调更新顶栏标题: 进入某个项目时把它
+  // 设置为 { parent, title }, 离开项目时传 null. 让顶栏出现面包屑,
+  // 明确表达"我现在处于 AI 小说创作 → 某个项目"的层级关系.
+  const [headerContext, setHeaderContext] = useState(null);
+  const activeNav = searchParams.get('page') || 'workbench';
+  const settingsTab = searchParams.get('tab') || 'models';
+  const routeProjectId = Number(searchParams.get('project') || '') || null;
+  const importNovelId = Number(searchParams.get('importNovel') || '') || null;
+
+  const updateRoute = useCallback((patch) => {
+    const next = new URLSearchParams(searchParams);
+    Object.entries(patch).forEach(([key, value]) => {
+      if (value == null || value === '') next.delete(key);
+      else next.set(key, String(value));
+    });
+    const page = next.get('page') || 'workbench';
+    if (page !== 'settings') next.delete('tab');
+    if (page !== 'creation') {
+      next.delete('project');
+      next.delete('importNovel');
+    }
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  const navHref = useCallback((page) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('page', page);
+    if (page !== 'settings') next.delete('tab');
+    if (page !== 'creation') {
+      next.delete('project');
+      next.delete('importNovel');
+    }
+    return `/?${next.toString()}`;
+  }, [searchParams]);
 
   const fetchModels = async () => {
     setModelsLoading(true);
@@ -161,11 +195,11 @@ function AppShell() {
     fetchModels();
   }, []);
 
-  useEffect(() => {
-    setTopSearch('');
-  }, [activeNav]);
-
   const meta = PAGE_META[activeNav] || PAGE_META.workbench;
+  const creationProps = useMemo(() => ({
+    routeProjectId,
+    importNovelId,
+  }), [importNovelId, routeProjectId]);
 
   return (
     <div className="workbench-shell rail-shell">
@@ -187,17 +221,16 @@ function AppShell() {
         <nav className="rail-nav">
           <span className="rail-nav-label">导航</span>
           {NAV_ITEMS.map((item) => (
-            <button
+            <NavLink
               key={item.key}
-              type="button"
+              to={navHref(item.key)}
               className={`rail-btn ${activeNav === item.key ? 'active' : ''}`}
-              onClick={() => setActiveNav(item.key)}
               title={item.title}
               aria-label={item.title}
             >
               <span className="rail-btn-icon">{item.icon}</span>
               <span>{item.title}</span>
-            </button>
+            </NavLink>
           ))}
         </nav>
 
@@ -261,7 +294,26 @@ function AppShell() {
         )}
         <header className="rail-topbar">
           <div className="rail-topbar-title">
-            <h1>{meta.title}</h1>
+            {headerContext?.parent && headerContext?.title ? (
+              // 进入创作项目时: 把顶栏标题改成面包屑, 表达层级关系
+              <nav className="rail-topbar-breadcrumb" aria-label="路径导航">
+                <button
+                  type="button"
+                  className="rail-topbar-crumb-link"
+                  onClick={() => {
+                    // 回到创作的项目列表 (而不是切到别的页面)
+                    updateRoute({ page: 'creation', project: null });
+                  }}
+                  title={`返回 ${headerContext.parent}`}
+                >
+                  {headerContext.parent}
+                </button>
+                <span className="rail-topbar-crumb-sep" aria-hidden="true">/</span>
+                <h1 className="rail-topbar-crumb-current">{headerContext.title}</h1>
+              </nav>
+            ) : (
+              <h1>{meta.title}</h1>
+            )}
           </div>
 
           <div className="rail-topbar-search" role="search">
@@ -269,17 +321,12 @@ function AppShell() {
               <circle cx="11" cy="11" r="8" stroke="currentColor" />
               <path d="M21 21l-4.35-4.35" stroke="currentColor" />
             </svg>
+            {/* 修复 #32: 全局搜索框占位, 但实际搜索由各页面内部实现. 这里仅作为视觉占位. */}
             <input
               type="text"
-              placeholder={
-                activeNav === 'workbench'
-                  ? '搜索项目标题、作者或内容...'
-                  : activeNav === 'image'
-                    ? '搜索结果...'
-                    : '搜索...'
-              }
-              value={topSearch}
-              onChange={(e) => setTopSearch(e.target.value)}
+              placeholder="搜索 (由当前页面处理)"
+              disabled
+              aria-label="页面级搜索"
             />
           </div>
 
@@ -287,7 +334,7 @@ function AppShell() {
             <EnrichmentTaskBanner
               onJumpToWorkbench={() => {
                 resetEnrichmentTask();
-                setActiveNav('workbench');
+                updateRoute({ page: 'workbench' });
               }}
             />
             <button
@@ -307,18 +354,38 @@ function AppShell() {
 
         <section className={`rail-body${activeNav === 'creation' ? ' rail-body-creation' : ''}`}>
           {activeNav === 'workbench' ? (
-            <Workbench
-              models={models}
-              topSearch={topSearch}
-              onGoToSettings={() => {
-                setSettingsTab('models');
-                setActiveNav('settings');
-              }}
-            />
+            <ErrorBoundary scope="我的项目" fallbackTitle="我的项目加载失败">
+              <Workbench
+                models={models}
+                onBridgeToCreation={(novelId) => {
+                  updateRoute({
+                    page: 'creation',
+                    project: null,
+                    importNovel: novelId,
+                  });
+                }}
+                onGoToSettings={() => {
+                  updateRoute({ page: 'settings', tab: 'models' });
+                }}
+              />
+            </ErrorBoundary>
           ) : activeNav === 'creation' ? (
-            <CreationStudio models={models} topSearch={topSearch} />
+            <ErrorBoundary scope="AI 小说创作" fallbackTitle="AI 创作加载失败">
+              <CreationStudio
+                models={models}
+                {...creationProps}
+                onImportNovelHandled={() => updateRoute({ importNovel: null })}
+                onProjectRouteChange={(projectId) => updateRoute({
+                  page: 'creation',
+                  project: projectId || null,
+                })}
+                onHeaderContextChange={setHeaderContext}
+              />
+            </ErrorBoundary>
           ) : activeNav === 'image' ? (
-            <ImageGenerationPage models={models} topSearch={topSearch} />
+            <ErrorBoundary scope="图像生成" fallbackTitle="图像生成加载失败">
+              <ImageGenerationPage models={models} />
+            </ErrorBoundary>
           ) : modelsLoading ? (
             <div className="loading-block">
               <div className="loading-spinner large"></div>
@@ -330,7 +397,7 @@ function AppShell() {
                 <button
                   type="button"
                   className={`settings-tab ${settingsTab === 'models' ? 'active' : ''}`}
-                  onClick={() => setSettingsTab('models')}
+                  onClick={() => updateRoute({ page: 'settings', tab: 'models' })}
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
                     <rect x="3" y="4" width="18" height="16" rx="3" stroke="currentColor" />
@@ -341,7 +408,7 @@ function AppShell() {
                 <button
                   type="button"
                   className={`settings-tab ${settingsTab === 'prompts' ? 'active' : ''}`}
-                  onClick={() => setSettingsTab('prompts')}
+                  onClick={() => updateRoute({ page: 'settings', tab: 'prompts' })}
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" strokeWidth="1.5">
                     <path d="M4 5h16M4 12h16M4 19h10" stroke="currentColor" strokeLinecap="round" />
@@ -350,9 +417,13 @@ function AppShell() {
                 </button>
               </div>
               {settingsTab === 'models' ? (
-                <ModelConfigPanel configs={models} refetch={fetchModels} />
+                <ErrorBoundary scope="模型配置" fallbackTitle="模型配置加载失败">
+                  <ModelConfigPanel configs={models} refetch={fetchModels} />
+                </ErrorBoundary>
               ) : (
-                <PromptManagerPanel />
+                <ErrorBoundary scope="提示词管理" fallbackTitle="提示词管理加载失败">
+                  <PromptManagerPanel />
+                </ErrorBoundary>
               )}
             </div>
           )}

@@ -17,15 +17,20 @@ from __future__ import annotations
 
 import base64
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
+from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 
+from config import IMAGE_CACHE_DIR
 from schemas import (
     ImageGenerationItem,
     ImageGenerationRequest,
     ImageGenerationResponse,
 )
+from services.metrics_service import record_image_call
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +342,9 @@ async def generate_images(
     timeout: float = IMAGE_TIMEOUT_SECONDS,
 ) -> ImageGenerationResponse:
     """Call the upstream image generation API and normalise the response."""
+    import time
+
+    started = time.monotonic()
     impl = get_provider(provider)
     endpoint = impl.build_endpoint(model_url)
     payload = impl.build_payload(request, model_name)
@@ -349,14 +357,18 @@ async def generate_images(
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(endpoint, headers=headers, json=payload)
     except httpx.TimeoutException as exc:
+        record_image_call(provider, "timeout", time.monotonic() - started)
         raise ImageGenerationError(f"图像生成超时: {exc}") from exc
     except httpx.HTTPError as exc:
+        record_image_call(provider, "network_error", time.monotonic() - started)
         raise ImageGenerationError(f"图像生成网络错误: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
+        record_image_call(provider, "exception", time.monotonic() - started)
         raise ImageGenerationError(f"图像生成失败: {exc}") from exc
 
     if response.status_code >= 400:
         body_preview = response.text[:300] if response.content else ""
+        record_image_call(provider, "http_error", time.monotonic() - started)
         raise ImageGenerationError(
             f"API 返回 {response.status_code}: {body_preview}"
         )
@@ -364,13 +376,18 @@ async def generate_images(
     try:
         body: Dict[str, Any] = response.json()
     except Exception as exc:  # noqa: BLE001
+        record_image_call(provider, "bad_json", time.monotonic() - started)
         raise ImageGenerationError(f"API 响应不是有效的 JSON: {exc}") from exc
 
     err = impl.is_error_response(body)
     if err:
+        record_image_call(provider, "api_error", time.monotonic() - started)
         raise ImageGenerationError(f"API 错误: {err}")
 
-    return impl.parse_response(body, model_name)
+    result = impl.parse_response(body, model_name)
+    result = await cache_generated_images(result)
+    record_image_call(provider, "success", time.monotonic() - started)
+    return result
 
 
 async def build_probe_request(
@@ -412,3 +429,70 @@ async def upload_reference_image(
     """
     encoded = base64.b64encode(file_bytes).decode("ascii")
     return f"data:{content_type};base64,{encoded}"
+
+
+def _guess_extension(content_type: Optional[str], source_url: Optional[str] = None) -> str:
+    if content_type:
+        if "png" in content_type:
+            return ".png"
+        if "webp" in content_type:
+            return ".webp"
+        if "jpeg" in content_type or "jpg" in content_type:
+            return ".jpg"
+    if source_url:
+        suffix = Path(urlparse(source_url).path).suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+            return suffix
+    return ".png"
+
+
+async def cache_image_bytes(
+    data: bytes,
+    *,
+    content_type: str = "image/png",
+    source_name: Optional[str] = None,
+) -> str:
+    ext = _guess_extension(content_type, source_name)
+    name = f"{uuid4().hex}{ext}"
+    path = IMAGE_CACHE_DIR / name
+    path.write_bytes(data)
+    return name
+
+
+async def cache_generated_images(
+    response: ImageGenerationResponse,
+) -> ImageGenerationResponse:
+    cached_items: List[ImageGenerationItem] = []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for item in response.images or []:
+            if item.b64:
+                data = base64.b64decode(item.b64)
+                filename = await cache_image_bytes(data, content_type="image/png")
+                cached_items.append(
+                    ImageGenerationItem(
+                        url=f"/api/image/cache/{filename}",
+                        b64=None,
+                    )
+                )
+                continue
+            if item.url and item.url.startswith(("http://", "https://")):
+                try:
+                    remote = await client.get(item.url)
+                    if remote.status_code < 400 and remote.content:
+                        filename = await cache_image_bytes(
+                            remote.content,
+                            content_type=remote.headers.get("content-type") or "image/png",
+                            source_name=item.url,
+                        )
+                        cached_items.append(
+                            ImageGenerationItem(
+                                url=f"/api/image/cache/{filename}",
+                                b64=None,
+                            )
+                        )
+                        continue
+                except Exception:
+                    logger.warning("cache remote image failed: %s", item.url, exc_info=True)
+            cached_items.append(ImageGenerationItem(url=item.url, b64=None))
+    response.images = cached_items
+    return response

@@ -8,7 +8,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from config import (
     API_HOST,
@@ -17,8 +17,9 @@ from config import (
     CORS_HEADERS,
     CORS_METHODS,
     CORS_ORIGINS,
+    write_port_file,
 )
-from database import init_db
+from database import close_db, init_db
 from routers import (
     creation_router,
     enrichment_router,
@@ -28,6 +29,7 @@ from routers import (
     prompts_router,
     tasks_router,
 )
+from services.metrics_service import render_metrics
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +42,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
-    yield
+    try:
+        yield
+    finally:
+        await close_db()
+        logger.info("Database connection closed")
 
 
 app = FastAPI(
@@ -98,6 +104,14 @@ def health_check():
     return {"status": "healthy"}
 
 
+@app.get("/metrics", include_in_schema=False)
+def metrics():
+    return PlainTextResponse(
+        render_metrics(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
 # ============================================================
 # 端口绑定:硬编码 8008,启动前强校验,不被其它程序干扰
 # ============================================================
@@ -147,11 +161,15 @@ def _preflight_check_port(host: str, port: int, retries: int = 5, delay: float =
 
 if __name__ == "__main__":
     logger.info(
-        "后端服务硬编码端口: %s:%d (写死,不会切换到其它端口)",
+        "后端服务端口: %s:%d (可用 AINOVEL_PORT 环境变量覆盖,默认 8008)",
         API_HOST, API_PORT,
     )
 
-    # 预检 8008:若被占用,短暂等待重试;持续占用则清晰报错退出
+    # 把最终端口写回 data/.port, 让前端 (尤其 Tauri 模式下) 启动时可读
+    # 到实际端口而不是猜 8008。
+    write_port_file(API_PORT)
+
+    # 预检端口:若被占用,短暂等待重试;持续占用则清晰报错退出
     if not _preflight_check_port(API_HOST, API_PORT):
         logger.error("=" * 64)
         logger.error(

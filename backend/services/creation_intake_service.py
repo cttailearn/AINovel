@@ -15,7 +15,6 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-import database as db
 from schemas import (
     AiIntakeHistoryItem,
     AiIntakeNextRequest,
@@ -47,18 +46,12 @@ class IntakeError(RuntimeError):
 
 
 async def _resolve_model_cfg(model_id: Optional[int]) -> Optional[Dict[str, Any]]:
-    if model_id:
-        cfg = await db.get_config_by_id(int(model_id))
-        if cfg and cfg.get("enabled"):
-            return cfg
-        logger.warning(
-            "intake.model_id=%s unavailable, falling back to first chat config",
-            model_id,
-        )
-    enabled = await db.get_enabled_configs_by_capability("chat")
-    if not enabled:
-        return None
-    return enabled[0]
+    """修复 #8: 转调 ai_service.resolve_chat_model 公共实现, 与
+    creation_service 行为一致.
+    """
+    from services import ai_service
+
+    return await ai_service.resolve_chat_model(model_id)
 
 
 # ---------------------------------------------------------------------------

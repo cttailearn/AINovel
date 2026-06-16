@@ -713,6 +713,10 @@ class AiChapterOut(BaseModel):
     final_content: Optional[str] = None
     word_count: int
     kg_extracted: int
+    # 修复 #16: 透传 KG 抽取时间戳 + 计数, 让前端能展示"X 分钟前入图谱"
+    kg_extracted_at: Optional[str] = None
+    kg_entity_count: int = 0
+    kg_event_count: int = 0
     # ⑦ Compass 字段
     compass_score: Optional[float] = None
     compass_warnings: List[Dict[str, str]] = Field(default_factory=list)
@@ -758,6 +762,10 @@ class AiChapterGenerateRequest(BaseModel):
         default=None, ge=1, description="不传则用 project.current_chapter_no"
     )
     title: str = Field(default="", max_length=200)
+    force: bool = Field(
+        default=False,
+        description="当目标 chapter_no 已存在时，是否保留历史并覆盖重生成",
+    )
     # Critic 循环最多重试次数 (含首次). 0 = 跑 1 次就接受, 默认 2 = 最多 3 轮.
     max_revise: int = Field(default=2, ge=0, le=5)
     # Critic overall 分数达到该阈值即视为通过, 立即收尾.
@@ -769,7 +777,7 @@ class AiChapterSelectRequest(BaseModel):
 
 
 class AiChapterContentUpdate(BaseModel):
-    content: str = Field(..., min_length=0)
+    content: str = Field(..., min_length=0, max_length=500_000)
 
 
 # ---------------------------------------------------------------------------

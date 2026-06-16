@@ -30,6 +30,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from services.metrics_service import record_task_finished
+
 logger = logging.getLogger(__name__)
 
 
@@ -222,18 +224,26 @@ class TaskRegistry:
     ) -> TaskRecord:
         """注册一条新任务. 同 (kind, subject_id) 同时只允许一个, 否则报错.
 
+        修复 #19: 额外支持 ``meta["scope"]`` 字段. 当 meta 含 scope 时, 互斥
+        维度从 (kind, subject_id) 变为 (kind, scope). 例如 kind=creation
+        scope=project:<id> 表示"同一个项目下同时只能跑一个生成任务, 不管
+        是第几章". 这避免了用户连点多个章节的「生成」按钮导致并发跑 10
+        个 LLM 任务把 token 打爆.
+
         之所以唯一: banner 一次只显示一条, 多条会冲突. 业务层在启动前应
         调用 ``get_active`` 检查是否已有活跃任务, 让用户先取消/结束.
         """
+        scope = (meta or {}).get("scope") or f"{kind}:{subject_id}"
         async with self._lock:
             for existing in self._tasks.values():
-                if (
-                    not existing.done
-                    and existing.kind == kind
-                    and existing.subject_id == subject_id
-                ):
+                if existing.done:
+                    continue
+                existing_scope = (existing.meta or {}).get("scope") or (
+                    f"{existing.kind}:{existing.subject_id}"
+                )
+                if existing_scope == scope:
                     raise RuntimeError(
-                        f"{kind}#{subject_id} 已有运行中的任务 "
+                        f"scope={scope} 已有运行中的任务 "
                         f"({existing.task_id}); 请先取消或等待其完成."
                     )
             record = TaskRecord(
@@ -245,8 +255,8 @@ class TaskRegistry:
             )
             self._tasks[record.task_id] = record
             logger.info(
-                "TaskRegistry: registered %s task_id=%s subject_id=%s title=%s",
-                kind, record.task_id, subject_id, title,
+                "TaskRegistry: registered %s task_id=%s subject_id=%s scope=%s title=%s",
+                kind, record.task_id, subject_id, scope, title,
             )
             return record
 
@@ -255,6 +265,7 @@ class TaskRegistry:
         if not rec:
             return
         await rec.finish(final_state)
+        record_task_finished(rec.kind, final_state)
         # 保留 record 一段时间便于前端查询终态; 用一个轻量延迟任务清理.
         asyncio.create_task(self._gc_later(task_id, delay=300.0))
 

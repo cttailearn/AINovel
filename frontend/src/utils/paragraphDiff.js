@@ -102,6 +102,85 @@ export function alignParagraphs(original, rewrite) {
   return result;
 }
 
+function splitSegmentParagraphs(text) {
+  return splitParagraphs(text || '');
+}
+
+function buildPairsFromChangeRun(removedItems, addedItems) {
+  const result = [];
+  const size = Math.max(removedItems.length, addedItems.length);
+  for (let i = 0; i < size; i += 1) {
+    const origText = removedItems[i] || '';
+    const rwtText = addedItems[i] || '';
+    if (origText && rwtText) {
+      result.push({
+        kind: origText === rwtText ? 'equal' : 'modified',
+        origIdx: -1,
+        rwtIdx: -1,
+        origText,
+        rwtText,
+      });
+    } else if (origText) {
+      result.push({
+        kind: 'orig_only',
+        origIdx: -1,
+        rwtIdx: -1,
+        origText,
+        rwtText: '',
+      });
+    } else if (rwtText) {
+      result.push({
+        kind: 'rwt_only',
+        origIdx: -1,
+        rwtIdx: -1,
+        origText: '',
+        rwtText,
+      });
+    }
+  }
+  return result;
+}
+
+export function alignParagraphsFromSegments(segments = []) {
+  const result = [];
+  let removedBuffer = [];
+  let addedBuffer = [];
+
+  const flushBuffers = () => {
+    if (removedBuffer.length === 0 && addedBuffer.length === 0) return;
+    result.push(...buildPairsFromChangeRun(removedBuffer, addedBuffer));
+    removedBuffer = [];
+    addedBuffer = [];
+  };
+
+  (segments || []).forEach((segment) => {
+    if (!segment?.text) return;
+    if (segment.type === 'unchanged') {
+      flushBuffers();
+      splitSegmentParagraphs(segment.text).forEach((text) => {
+        result.push({
+          kind: 'equal',
+          origIdx: -1,
+          rwtIdx: -1,
+          origText: text,
+          rwtText: text,
+        });
+      });
+      return;
+    }
+    if (segment.type === 'removed') {
+      removedBuffer.push(...splitSegmentParagraphs(segment.text));
+      return;
+    }
+    if (segment.type === 'added') {
+      addedBuffer.push(...splitSegmentParagraphs(segment.text));
+    }
+  });
+
+  flushBuffers();
+  return result;
+}
+
 // ============== 内部工具 (从 textDiffUtil 复用) ==============
 
 // 重新导出, 避免外部依赖复杂

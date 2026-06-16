@@ -203,6 +203,3 @@ export function VariantTabs({
     </div>
   );
 }
-
-// 保留旧名导出以便兼容
-export { VariantTabs as VariantCards };

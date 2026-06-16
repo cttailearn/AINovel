@@ -28,6 +28,39 @@ function writeJSON(key, value) {
   } catch { /* noop */ }
 }
 
+// 修复 #33: schemaVersion — 字段未来加 / 改时, 旧数据能自动清掉而不会 crash.
+// 每改一次持久化结构, 把 SCHEMA_VERSION + 1 并在 readJSONWithVersion 加
+// 迁移规则即可. 当前 v1 = 初始结构.
+const SCHEMA_VERSION = 1;
+
+function readJSONWithVersion(key, fallback, schemaVersion) {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    const wrapped = JSON.parse(raw);
+    if (!wrapped || typeof wrapped !== 'object') return fallback;
+    if (wrapped.__schema !== schemaVersion) {
+      // 版本不匹配: 丢弃旧数据, 避免字段缺失/类型变更导致页面崩溃
+      try { window.localStorage.removeItem(key); } catch { /* noop */ }
+      return fallback;
+    }
+    return wrapped.data ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJSONWithVersion(key, data, schemaVersion) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ __schema: schemaVersion, data, __at: Date.now() })
+    );
+  } catch { /* noop */ }
+}
+
 const ASPECT_OPTIONS = [
   { value: '1:1', label: '1:1 (1024×1024)' },
   { value: '16:9', label: '16:9 (1280×720)' },
@@ -59,15 +92,6 @@ const MODE_OPTIONS = [
     description: '上传参考图（人物主体）后再生成',
   },
 ];
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
 
 function ResultCard({ item, index, onRemove }) {
   const src = item.url || (item.b64 ? `data:image/png;base64,${item.b64}` : null);
@@ -112,7 +136,7 @@ function ResultCard({ item, index, onRemove }) {
   );
 }
 
-export function ImageGenerationPage({ models, topSearch }) {
+export function ImageGenerationPage({ models }) {
   const toast = useToast();
   const [imageModels, setImageModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -148,21 +172,24 @@ export function ImageGenerationPage({ models, topSearch }) {
   const [aigcWatermark, setAigcWatermark] = useState(() => Boolean(readJSON(FORM_KEY, { aigcWatermark: false }).aigcWatermark));
   const [responseFormat, setResponseFormat] = useState(() => readJSON(FORM_KEY, { responseFormat: 'url' }).responseFormat);
 
-  const [references, setReferences] = useState([]); // [{ name, size, dataUri }] — 二进制, 不进 localStorage
+  const [references, setReferences] = useState([]); // [{ name, size, dataUri, previewUrl }] — 二进制, 不进 localStorage
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef(null);
+  // 修复 #32: 页面内自管搜索
+  const [search, setSearch] = useState('');
 
   const [generating, setGenerating] = useState(false);
   const [lastTask, setLastTask] = useState(() => readJSON(LAST_TASK_KEY, null));
   const [results, setResults] = useState(() => {
-    const saved = readJSON(RESULTS_KEY, []);
+    // 修复 #33: 用 schemaVersion 包装读, 老格式 / 跨版本数据直接丢弃
+    const saved = readJSONWithVersion(RESULTS_KEY, [], SCHEMA_VERSION);
     return Array.isArray(saved) ? saved : [];
   });
   const [error, setError] = useState(null);
 
   // 持久化: 任一表单字段变更都写一次 localStorage (合并写, 减少 IO).
   useEffect(() => {
-    writeJSON(FORM_KEY, {
+    writeJSONWithVersion(FORM_KEY, {
       selectedModelId,
       mode,
       prompt,
@@ -175,7 +202,7 @@ export function ImageGenerationPage({ models, topSearch }) {
       promptOptimizer,
       aigcWatermark,
       responseFormat,
-    });
+    }, SCHEMA_VERSION);
   }, [
     selectedModelId, mode, prompt, negativePrompt, aspectRatio, n, seed,
     styleType, styleWeight, promptOptimizer, aigcWatermark, responseFormat,
@@ -187,11 +214,15 @@ export function ImageGenerationPage({ models, topSearch }) {
   }, [lastTask]);
   useEffect(() => {
     if (results.length === 0) {
-      writeJSON(RESULTS_KEY, null);
+      writeJSONWithVersion(RESULTS_KEY, null, SCHEMA_VERSION);
       return;
     }
     // 只保留最近 N 条, 防止 localStorage 5MB 限制
-    writeJSON(RESULTS_KEY, results.slice(0, MAX_PERSISTED_RESULTS));
+    writeJSONWithVersion(
+      RESULTS_KEY,
+      results.slice(0, MAX_PERSISTED_RESULTS),
+      SCHEMA_VERSION,
+    );
   }, [results]);
 
   // Filter to image-capable models from the page-level `models` prop.
@@ -233,10 +264,11 @@ export function ImageGenerationPage({ models, topSearch }) {
   }, [allImageModels, selectedModelId]);
 
   const filteredResults = useMemo(() => {
-    if (!topSearch) return results;
-    const k = topSearch.toLowerCase();
-    return results.filter((_, idx) => `生成 ${idx + 1}`.toLowerCase().includes(k));
-  }, [results, topSearch]);
+    // 修复 #32: 用组件内 search 状态而非外部 topSearch
+    if (!search) return results;
+    const k = search.toLowerCase();
+    return results.filter((r) => (r.prompt || '').toLowerCase().includes(k));
+  }, [results, search]);
 
   const handleReferenceUpload = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -253,8 +285,14 @@ export function ImageGenerationPage({ models, topSearch }) {
           toast.error(`文件过大: ${file.name}（上限 10MB）`);
           continue;
         }
-        const dataUri = await readFileAsDataUrl(file);
-        newRefs.push({ name: file.name, size: file.size, dataUri, type: file.type });
+        const uploaded = await api.image.uploadReference(file);
+        newRefs.push({
+          name: file.name,
+          size: file.size,
+          dataUri: uploaded?.data_uri,
+          previewUrl: uploaded?.url || uploaded?.data_uri,
+          type: file.type,
+        });
       }
       if (newRefs.length) {
         setReferences((prev) => [...prev, ...newRefs]);
@@ -277,7 +315,13 @@ export function ImageGenerationPage({ models, topSearch }) {
       toast.error('URL 必须以 http:// 或 https:// 开头');
       return;
     }
-    setReferences((prev) => [...prev, { name: url, size: null, dataUri: url, isUrl: true }]);
+    setReferences((prev) => [...prev, {
+      name: url,
+      size: null,
+      dataUri: url,
+      previewUrl: url,
+      isUrl: true,
+    }]);
     setMode('image');
   };
 
@@ -350,7 +394,7 @@ export function ImageGenerationPage({ models, topSearch }) {
     setLastTask(null);
     setError(null);
     // 同时清掉持久化, 避免下次进入又恢复
-    writeJSON(RESULTS_KEY, null);
+    writeJSONWithVersion(RESULTS_KEY, null, SCHEMA_VERSION);
     writeJSON(LAST_TASK_KEY, null);
   };
 
@@ -585,7 +629,7 @@ export function ImageGenerationPage({ models, topSearch }) {
                     <div className="reference-grid">
                       {references.map((ref, idx) => (
                         <div className="reference-thumb" key={`${ref.name}-${idx}`}>
-                          <img src={ref.dataUri} alt={ref.name} />
+                          <img src={ref.previewUrl || ref.dataUri} alt={ref.name} />
                           <button
                             type="button"
                             className="reference-remove"

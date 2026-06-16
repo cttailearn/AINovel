@@ -49,13 +49,31 @@ class CreationError(RuntimeError):
 
 
 # P2-#30: 错误信息脱敏 — 不把 API key / 内网地址 / 堆栈返回给前端
+# 修复 #13: 扩展覆盖国产厂商 key (sk-xxx / Bearer / API_KEY= / Authorization:)
+# 及 172.16-31 RFC1918 私有网段, 避免在错误消息中泄漏任何凭据或内网拓扑
 _SENSITIVE_PATTERNS = [
+    # OpenAI / Anthropic / 多数国产厂商统一使用 sk- 前缀
     (re.compile(r'sk-[A-Za-z0-9_\-]{8,}'), 'sk-***'),
-    (re.compile(r'Bearer\s+[A-Za-z0-9_\-\.]{8,}'), 'Bearer ***'),
-    (re.compile(r'://[^/\s]+@'), '://***@'),  # user:pass@host
+    # Groq: gsk-..., Cohere: ..., 这里单独覆盖
+    (re.compile(r'gsk-[A-Za-z0-9_\-]{8,}'), 'gsk-***'),
+    # 国产通义 / DeepSeek / 月之暗面 等也可能用 sk- 加自定义前缀
+    (re.compile(r'sk-[A-Za-z0-9_\-]{4,}[A-Z][A-Za-z0-9_\-]{4,}'), 'sk-***'),
+    # Authorization 头 (任意大小写前缀) + 长串 token
+    (re.compile(r'(?i)(authorization\s*[:=]\s*)[A-Za-z0-9_\-\.=]{8,}'), r'\1***'),
+    # Bearer / Token 关键字后的长串
+    (re.compile(r'(?i)\bbearer\s+[A-Za-z0-9_\-\.=]{8,}'), 'Bearer ***'),
+    (re.compile(r'(?i)\btoken\s+[A-Za-z0-9_\-\.=]{8,}'), 'Token ***'),
+    # API_KEY=xxx 自定义环境变量风格
+    (re.compile(r'(?i)(api[_-]?key\s*=\s*)[^\s,&;"\']{8,}'), r'\1***'),
+    # URL 中的 user:password@host
+    (re.compile(r'://[^/\s:]+:[^/\s@]+@'), '://***:***@'),
+    # 内网地址 (RFC1918 全部段)
     (re.compile(r'127\.0\.0\.\d+'), '127.0.0.x'),
     (re.compile(r'10\.\d{1,3}\.\d{1,3}\.\d{1,3}'), '10.x.x.x'),
     (re.compile(r'192\.168\.\d{1,3}\.\d{1,3}'), '192.168.x.x'),
+    (re.compile(r'172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}'), '172.16-31.x.x'),
+    # IPv6 link-local
+    (re.compile(r'fe80:[0-9a-f:]+', re.IGNORECASE), 'fe80:***'),
 ]
 
 
@@ -77,6 +95,18 @@ def sanitize_error(exc: Exception) -> str:
 
 async def list_projects() -> List[Dict[str, Any]]:
     return await db.list_ai_projects()
+
+
+async def assert_project_exists(project_id: int) -> None:
+    """修复 #7: 轻量项目存在性校验, 只查 id 字段.
+
+    用于所有 KG / PlotThread 端点 — 之前每个端点都先 ``get_project_detail``
+    拉全量数据 (project + chapters + kg_stats + locations + threads + themes +
+    kg_full), 单次请求 7 次数据库往返. 现在只查 id, 0 数据.
+    """
+    pid = await db.get_ai_project_id(project_id)
+    if not pid:
+        raise CreationError(f"项目 {project_id} 不存在")
 
 
 async def get_project_detail(project_id: int) -> Dict[str, Any]:
@@ -125,7 +155,12 @@ async def get_project_detail(project_id: int) -> Dict[str, Any]:
     }
 
 
-async def create_project(payload: Dict[str, Any]) -> int:
+async def create_project(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """创建项目并返回 {id, seed_warning?, kg_stats?}.
+
+    修复 #4: 之前自动 seed 失败只打 logger.warning, UI 无感. 现在把警告
+    透传给前端, 让用户知道"已创建项目, 但 KG 自动灌入失败, 可手动重试".
+    """
     project_id = await db.create_ai_project(
         title=payload.get("title") or "未命名项目",
         genre=payload.get("genre", ""),
@@ -135,6 +170,7 @@ async def create_project(payload: Dict[str, Any]) -> int:
         style_pref=payload.get("style_pref") or {},
         model_id=payload.get("model_id"),
     )
+    result: Dict[str, Any] = {"id": project_id}
     # 自动把 initial_concepts 灌入知识图谱, 让项目从创建那一刻起就有
     # 完整的人物/事件/世界观上下文, 指引整本小说创作.
     if payload.get("initial_concepts"):
@@ -145,17 +181,25 @@ async def create_project(payload: Dict[str, Any]) -> int:
                 project_id,
                 len(payload.get("initial_concepts") or []),
             )
+            result["kg_stats"] = await db.get_ai_kg_stats(project_id)
         except Exception as exc:  # noqa: BLE001
-            # 自动 seed 失败不应阻塞项目创建
+            # 自动 seed 失败不应阻塞项目创建, 但要把警告回给前端
             logger.warning("Auto-seed KG failed for project %s: %s", project_id, exc)
-    return project_id
+            result["seed_warning"] = (
+                f"项目已创建, 但知识图谱自动灌入失败 ({sanitize_error(exc)}). "
+                "可在项目设置页手动重新灌入."
+            )
+    return result
 
 
-async def update_project(project_id: int, payload: Dict[str, Any]) -> bool:
+async def update_project(project_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     """更新项目设定. 当 initial_concepts 列表发生变化时, 自动重新灌入
     知识图谱 (保留 LLM 后抽取的实体, 只新增/补齐 initial_concepts 里的
     人物). 这样用户编辑设定时无需再手动点「灌入」按钮, 也避免了
     灌入覆盖后续章节抽取的新实体.
+
+    修复 #4: 返回 {ok, seed_warning?, reseeded?, kg_stats?} 而不是 bool,
+    让前端能感知"已重新灌入 / 灌入失败"的状态变化.
     """
     # 先拿一次旧值, 用于对比 initial_concepts 是否变了
     old_concepts: Optional[List[Dict[str, Any]]] = None
@@ -175,7 +219,9 @@ async def update_project(project_id: int, payload: Dict[str, Any]) -> bool:
         status=payload.get("status"),
     )
     if not ok:
-        return False
+        return {"ok": False}
+
+    result: Dict[str, Any] = {"ok": True}
 
     # initial_concepts 变更检测: 与旧值不一致就重新灌入 (upsert, 不删除已有实体)
     if "initial_concepts" in payload:
@@ -187,12 +233,18 @@ async def update_project(project_id: int, payload: Dict[str, Any]) -> bool:
                     "Auto re-seeded KG after initial_concepts update for project %s",
                     project_id,
                 )
+                result["reseeded"] = True
+                result["kg_stats"] = await db.get_ai_kg_stats(project_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Auto re-seed KG failed for project %s: %s",
                     project_id, exc,
                 )
-    return True
+                result["seed_warning"] = (
+                    f"项目已更新, 但知识图谱重新灌入失败 ({sanitize_error(exc)}). "
+                    "可在项目设置页手动重试."
+                )
+    return result
 
 
 def _concepts_equal(
@@ -326,23 +378,18 @@ async def seed_kg_from_concepts(project_id: int) -> Dict[str, int]:
 async def _resolve_model_cfg(project: Dict[str, Any]) -> Dict[str, Any]:
     """取项目设置的 model_id 对应的 chat 模型配置.
 
+    修复 #8: 转调 ai_service.resolve_chat_model 公共实现, 避免和
+    creation_intake_service._resolve_model_cfg 漂移.
     若项目未指定, 回落到第一个 enabled 的 chat 模型. 都不可用时抛错.
     """
-    model_id = project.get("model_id")
-    if model_id:
-        cfg = await db.get_config_by_id(int(model_id))
-        if cfg and cfg.get("enabled"):
-            return cfg
-        logger.warning(
-            "project.model_id=%s unavailable, falling back to first chat config",
-            model_id,
-        )
-    enabled = await db.get_enabled_configs_by_capability("chat")
-    if not enabled:
+    from services import ai_service
+
+    cfg = await ai_service.resolve_chat_model(project.get("model_id"))
+    if not cfg:
         raise CreationError(
             "未配置可用的 chat 模型. 请先在「系统设置 → 模型配置」中添加并启用."
         )
-    return enabled[0]
+    return cfg
 
 
 def _ascii_word_count(text: str) -> int:
@@ -517,6 +564,7 @@ async def generate_chapter_streaming(
     user_intent: str = "",
     chapter_no: Optional[int] = None,
     title: str = "",
+    force: bool = False,
     max_revise: int = 2,
     score_threshold: float = 7.0,
 ) -> AsyncIterator[Dict[str, Any]]:
@@ -542,6 +590,7 @@ async def generate_chapter_streaming(
         user_intent=user_intent,
         chapter_no=chapter_no,
         title=title,
+        force=force,
         max_revise=max_revise,
         score_threshold=score_threshold,
     ):
@@ -580,6 +629,7 @@ async def _generate_chapter_streaming_single(
     user_intent: str = "",
     chapter_no: Optional[int] = None,
     title: str = "",
+    force: bool = False,
     max_revise: int = 2,
     score_threshold: float = 7.0,
 ) -> AsyncIterator[Dict[str, Any]]:
@@ -601,25 +651,53 @@ async def _generate_chapter_streaming_single(
         yield {"event": "error", "message": str(exc)}
         return
 
-    target_chapter_no = int(chapter_no or project.get("current_chapter_no") or 1)
+    project_id_int = int(project["id"])
+    target_chapter_no = int(chapter_no) if chapter_no else await db.next_available_chapter_no(project_id_int)
     existing = await db.list_ai_chapters(project_id)
-    for ch in existing:
-        if int(ch.get("chapter_no")) == target_chapter_no:
-            await db.delete_ai_chapter(int(ch["id"]))
-
-    chapter_id = await db.create_ai_chapter(
-        project_id=project_id,
-        chapter_no=target_chapter_no,
-        title=title.strip(),
-        user_intent=user_intent.strip(),
-        status="generating",
+    existing_chapter = next(
+        (ch for ch in existing if int(ch.get("chapter_no")) == target_chapter_no),
+        None,
     )
+    generation_round = 1
+    chapter_title_seed = title.strip()
+    chapter_intent_seed = user_intent.strip()
+    if existing_chapter:
+        if not force:
+            yield {
+                "event": "error",
+                "message": (
+                    f"第 {target_chapter_no} 章已存在。请在确认重新生成后携带 force=true 重试，"
+                    "系统会保留旧变体历史并覆盖当前正文。"
+                ),
+            }
+            return
+        chapter_id = int(existing_chapter["id"])
+        chapter_title_seed = chapter_title_seed or str(existing_chapter.get("title") or "")
+        chapter_intent_seed = (
+            chapter_intent_seed or str(existing_chapter.get("user_intent") or "")
+        )
+        generation_round = await db.prepare_ai_chapter_for_regeneration(
+            chapter_id,
+            title=chapter_title_seed,
+            user_intent=chapter_intent_seed,
+        )
+    else:
+        chapter_id = await db.create_ai_chapter(
+            project_id=project_id,
+            chapter_no=target_chapter_no,
+            title=chapter_title_seed,
+            user_intent=chapter_intent_seed,
+            status="generating",
+        )
+    effective_user_intent = chapter_intent_seed
 
     yield {
         "event": "start",
         "chapter_id": chapter_id,
         "chapter_no": target_chapter_no,
-        "title": title.strip(),
+        "title": chapter_title_seed,
+        "force": force,
+        "generation_round": generation_round,
         "model_id": model_cfg.get("id"),
         "mode": "single",
         "max_revise": max_revise,
@@ -630,7 +708,6 @@ async def _generate_chapter_streaming_single(
     writer = WriterAgent()
     critic = CriticAgent()
 
-    project_id_int = int(project["id"])
     kg_context_base = await _kg_context_for(project_id_int)
     last_chapter_tail = await _get_last_chapter_tail(project_id_int)
     last_summary = await _get_last_chapter_summary(project_id_int)
@@ -689,12 +766,12 @@ async def _generate_chapter_streaming_single(
                     PlannerDirection(
                         index=0,
                         title="(待规划)",
-                        synopsis=user_intent or "(基于用户意图生成)",
+                        synopsis=effective_user_intent or "(基于用户意图生成)",
                         focus="综合",
                     )
                 ],
                 chapter_no=target_chapter_no,
-                user_intent=user_intent,
+                user_intent=effective_user_intent,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("chapter_title failed, fallback: %s", exc)
@@ -733,7 +810,7 @@ async def _generate_chapter_streaming_single(
         feedback_text = _format_critic_feedback(last_critic) if last_critic else ""
         try:
             planner_inputs = await _build_planner_inputs(
-                project, user_intent, target_chapter_no
+                project, effective_user_intent, target_chapter_no
             )
             planner_out = await planner.run(
                 model_cfg=model_cfg,
@@ -772,7 +849,7 @@ async def _generate_chapter_streaming_single(
                 direction=direction,
                 kg_context=kg_context_for_writer,
                 last_chapter_tail=last_chapter_tail,
-                user_intent=user_intent,
+                user_intent=effective_user_intent,
                 chapter_no=target_chapter_no,
                 chapter_title=chapter_title,
                 feedback=feedback_text,
@@ -863,6 +940,7 @@ async def _generate_chapter_streaming_single(
         critic_report=last_critic.to_dict() if last_critic else {},
         score=final_overall,
         model_id=model_cfg.get("id"),
+        generation_round=generation_round,
     )
 
     # 写入正文字数, 并把 selected_variant_id / final_content 落到章节行,
@@ -876,7 +954,10 @@ async def _generate_chapter_streaming_single(
     )
     await db.update_ai_project(
         project_id,
-        current_chapter_no=target_chapter_no + 1,
+        current_chapter_no=max(
+            int(project.get("current_chapter_no") or 1),
+            target_chapter_no + 1,
+        ),
     )
 
     yield {

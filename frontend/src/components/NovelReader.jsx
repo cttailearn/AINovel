@@ -972,6 +972,7 @@ function NovelReader({ novelId, onBack, models: externalModels, onGoToWorkbench 
                     <MergedReader
                       original={currentContent || ''}
                       rewrite={currentEnrichment?.rewrite_text || ''}
+                      diffSegments={previewSegments}
                     />
                   </div>
                 )}
@@ -981,6 +982,7 @@ function NovelReader({ novelId, onBack, models: externalModels, onGoToWorkbench 
                     <SideBySideReader
                       original={currentContent || ''}
                       rewrite={currentEnrichment?.rewrite_text || ''}
+                      diffSegments={previewSegments}
                     />
                   </div>
                 )}

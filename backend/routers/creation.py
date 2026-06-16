@@ -4,10 +4,10 @@ Mounted at ``/api/creation``. The chapter generation endpoint
 (``POST /projects/{id}/chapters/generate``) is a Server-Sent Events stream;
 the client uses ``api.creation.generate`` in the frontend.
 
-任务持久化
+任务持久�?
 ----------
-与 enrichment 一致: 章节生成任务在 ``TaskRegistry`` 中以应用作用域的形式
-跑. SSE 客户端断开不再取消任务, 用户刷新后通过 ``task_id`` 重新订阅即可.
+�?enrichment 一�? 章节生成任务�?``TaskRegistry`` 中以应用作用域的形式
+�? SSE 客户端断开不再取消任务, 用户刷新后通过 ``task_id`` 重新订阅即可.
 """
 from __future__ import annotations
 
@@ -64,6 +64,28 @@ def _sse_format(event: str, data: Any) -> bytes:
     return f"data: {payload}\n\n".encode("utf-8")
 
 
+def _sse_error_response(status_code: int, message: str) -> StreamingResponse:
+    """修复 #14: 把业务校验失败包装成 SSE 响应, 让前端能在 toast 里看到
+    真实错误原因, 而不是 "请求失败 (404)".
+
+    通过返回 200 + 单条 error SSE 事件 + 立即关闭流, 让 EventSource / XHR
+    走正常成功路径解析 body.
+    """
+    async def gen() -> AsyncIterator[bytes]:
+        yield _sse_format("error", {"message": message, "status": status_code})
+        yield _sse_format("__end__", {"final_state": "error"})
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 def _map_creation_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc) or exc.__class__.__name__)
 
@@ -82,10 +104,10 @@ async def list_projects():
 @router.post("/projects", response_model=Dict[str, Any])
 async def create_project(payload: AiProjectCreate):
     try:
-        new_id = await creation_service.create_project(payload.model_dump())
+        result = await creation_service.create_project(payload.model_dump())
     except Exception as exc:  # noqa: BLE001
         raise _map_creation_error(exc) from exc
-    return {"id": new_id}
+    return result
 
 
 @router.get("/projects/{project_id}", response_model=AiProjectDetailResponse)
@@ -100,10 +122,10 @@ async def get_project(project_id: int):
 @router.put("/projects/{project_id}")
 async def update_project(project_id: int, payload: AiProjectUpdate):
     data = payload.model_dump(exclude_unset=True)
-    ok = await creation_service.update_project(project_id, data)
-    if not ok:
+    result = await creation_service.update_project(project_id, data)
+    if not result.get("ok"):
         raise HTTPException(status_code=404, detail="项目不存在或未变更")
-    return {"ok": True}
+    return result
 
 
 @router.delete("/projects/{project_id}")
@@ -116,7 +138,7 @@ async def delete_project(project_id: int):
 
 @router.post("/projects/{project_id}/duplicate")
 async def duplicate_project(project_id: int):
-    """UX-#15: 复制项目 (只复制设定 + KG, 不复制章节正文)."""
+    """UX-#15: 复制项目 (只复制设�?+ KG, 不复制章节正�?."""
     try:
         new_id = await creation_service.duplicate_project(project_id)
     except creation_service.CreationError as exc:
@@ -125,7 +147,7 @@ async def duplicate_project(project_id: int):
 
 
 # ---------------------------------------------------------------------------
-# 新建项目引导式问答 (Intake wizard)
+# 新建项目引导式问�?(Intake wizard)
 # ---------------------------------------------------------------------------
 
 
@@ -136,8 +158,8 @@ async def duplicate_project(project_id: int):
 async def intake_synthesize(payload: AiIntakeSynthesizeRequest):
     """把引导式问答结果交给 LLM, 综合为可一键建项的项目草稿.
 
-    LLM 不可用 / 输出非法 JSON 时, 仍会走本地兜底返回一份可用的草稿,
-    因此该接口在系统配置基本正确的前提下不应抛 5xx.
+    LLM 不可�?/ 输出非法 JSON �? 仍会走本地兜底返回一份可用的草稿,
+    因此该接口在系统配置基本正确的前提下不应�?5xx.
     """
     try:
         return await creation_intake_service.synthesize_project(payload)
@@ -156,9 +178,9 @@ async def intake_synthesize(payload: AiIntakeSynthesizeRequest):
     response_model=AiIntakeNextResponse,
 )
 async def intake_next(payload: AiIntakeNextRequest):
-    """根据已完成的问答历史, 让 LLM 动态生成下一道题 (4~8 个差异化选项).
+    """根据已完成的问答历史, �?LLM 动态生成下一道题 (4~8 个差异化选项).
 
-    不可恢复错误只发生在 ``items`` 字段类型错乱时; LLM 不可用 / 输出非法 JSON
+    不可恢复错误只发生在 ``items`` 字段类型错乱�? LLM 不可�?/ 输出非法 JSON
     / 模型无响应时, 会走本地兜底题库, 接口仍能正常返回下一题或 done 信号.
     """
     try:
@@ -168,7 +190,7 @@ async def intake_next(payload: AiIntakeNextRequest):
     except Exception as exc:  # noqa: BLE001
         logger.exception("intake next crashed: %s", exc)
         raise HTTPException(
-            status_code=500, detail=f"生成下一题失败: {exc}"
+            status_code=500, detail=f"生成下一题失�? {exc}"
         ) from exc
 
 
@@ -221,7 +243,7 @@ def _map_creation_value_error(exc: ValueError) -> HTTPException:
 async def create_kg_character(project_id: int, payload: AiKgCharacterCreate):
     try:
         # 确认项目存在
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         entity_id = _normalize_entity_id(payload.entity_id, "char")
         new_id = await db.insert_ai_kg_character(
             project_id,
@@ -246,7 +268,7 @@ async def update_kg_character(
 ):
     data = payload.model_dump(exclude_unset=True)
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.update_ai_kg_character(project_id, entity_id, **data)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -258,7 +280,7 @@ async def update_kg_character(
 @router.delete("/projects/{project_id}/kg/characters/{entity_id}")
 async def delete_kg_character(project_id: int, entity_id: str):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.delete_ai_kg_character(project_id, entity_id)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -270,7 +292,7 @@ async def delete_kg_character(project_id: int, entity_id: str):
 @router.post("/projects/{project_id}/kg/events")
 async def create_kg_event(project_id: int, payload: AiKgEventCreate):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         entity_id = _normalize_entity_id(payload.entity_id, "evt")
         new_id = await db.insert_ai_kg_event(
             project_id,
@@ -293,7 +315,7 @@ async def update_kg_event(
 ):
     data = payload.model_dump(exclude_unset=True)
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.update_ai_kg_event(project_id, entity_id, **data)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -305,7 +327,7 @@ async def update_kg_event(
 @router.delete("/projects/{project_id}/kg/events/{entity_id}")
 async def delete_kg_event(project_id: int, entity_id: str):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.delete_ai_kg_event(project_id, entity_id)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -317,7 +339,7 @@ async def delete_kg_event(project_id: int, entity_id: str):
 @router.post("/projects/{project_id}/kg/locations")
 async def create_kg_location(project_id: int, payload: AiKgLocationCreate):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         entity_id = _normalize_entity_id(payload.entity_id, "loc")
         new_id = await db.insert_ai_kg_location(
             project_id,
@@ -339,7 +361,7 @@ async def update_kg_location(
 ):
     data = payload.model_dump(exclude_unset=True)
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.update_ai_kg_location(project_id, entity_id, **data)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -351,12 +373,12 @@ async def update_kg_location(
 @router.delete("/projects/{project_id}/kg/locations/{entity_id}")
 async def delete_kg_location(project_id: int, entity_id: str):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.delete_ai_kg_location(project_id, entity_id)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if not ok:
-        raise HTTPException(status_code=404, detail=f"地点 {entity_id} 不存在")
+        raise HTTPException(status_code=404, detail=f"地点 {entity_id} 不存不存在")
     return {"ok": True}
 
 
@@ -365,7 +387,7 @@ async def create_kg_ce_relation(
     project_id: int, payload: AiKgCharacterEventRelationCreate
 ):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         new_id = await db.insert_ai_kg_character_event_relation(
             project_id,
             source_entity_id=payload.source_entity_id,
@@ -384,7 +406,7 @@ async def create_kg_ce_relation(
 @router.get("/projects/{project_id}/plot-threads")
 async def list_plot_threads(project_id: int, status: Optional[str] = None):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         threads = await db.list_ai_kg_plot_threads(project_id, status=status)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -394,7 +416,7 @@ async def list_plot_threads(project_id: int, status: Optional[str] = None):
 @router.post("/projects/{project_id}/plot-threads")
 async def create_plot_thread(project_id: int, payload: AiPlotThreadCreate):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         thread_id = payload.thread_id or f"thr_{uuid.uuid4().hex[:10]}"
         new_id = await db.insert_ai_kg_plot_thread(
             project_id,
@@ -419,38 +441,38 @@ async def update_plot_thread(
 ):
     data = payload.model_dump(exclude_unset=True)
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.update_ai_kg_plot_thread(project_id, thread_id, **data)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if not ok:
-        raise HTTPException(status_code=404, detail=f"线索 {thread_id} 不存在")
+        raise HTTPException(status_code=404, detail=f"线索 {thread_id} 不存不存在")
     return {"ok": True, "thread_id": thread_id}
 
 
 @router.delete("/projects/{project_id}/plot-threads/{thread_id}")
 async def delete_plot_thread(project_id: int, thread_id: str):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.delete_ai_kg_plot_thread(project_id, thread_id)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if not ok:
-        raise HTTPException(status_code=404, detail=f"线索 {thread_id} 不存在")
+        raise HTTPException(status_code=404, detail=f"线索 {thread_id} 不存不存在")
     return {"ok": True}
 
 
 @router.delete("/projects/{project_id}/kg/relations/{rel_kind}/{rel_id}")
 async def delete_kg_relation(project_id: int, rel_kind: str, rel_id: int):
     try:
-        await creation_service.get_project_detail(project_id)
+        await creation_service.assert_project_exists(project_id)
         ok = await db.delete_ai_kg_relation(project_id, rel_kind, rel_id)
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise _map_creation_value_error(exc) from exc
     if not ok:
-        raise HTTPException(status_code=404, detail=f"关系 {rel_kind}/{rel_id} 不存在")
+        raise HTTPException(status_code=404, detail=f"关系 {rel_kind}/{rel_id} 不存不存在")
     return {"ok": True}
 
 
@@ -491,17 +513,17 @@ async def get_chapter(chapter_id: int):
 
 @router.delete("/chapters/{chapter_id}")
 async def delete_chapter(chapter_id: int):
-    """删除单个章节 (含变体). 会回退 project.current_chapter_no 避免空号."""
+    """删除单个章节 (含变�?. 会回退 project.current_chapter_no 避免空号."""
     ok = await creation_service.delete_chapter(chapter_id)
     if not ok:
-        raise HTTPException(status_code=404, detail=f"章节 {chapter_id} 不存在")
+        raise HTTPException(status_code=404, detail=f"章节 {chapter_id} 不存不存在")
     return {"ok": True}
 
 
 @router.get("/chapters/{chapter_id}/variants/history")
 async def get_chapter_variants_history(chapter_id: int):
-    """P0-#3: 获取章节全部变体 (含历史轮次), 按 round/idx 排序.
-    用于"查看历史版本"UI, 让用户能回退到之前任意一轮.
+    """P0-#3: 获取章节全部变体 (含历史轮�?, �?round/idx 排序.
+    用于"查看历史版本"UI, 让用户能回退到之前任意一�?
     """
     try:
         history = await creation_service.get_chapter_variants_history(chapter_id)
@@ -515,7 +537,7 @@ async def export_chapter(
     chapter_id: int,
     format: str = Query("txt", pattern="^(txt|md)$"),
 ):
-    """把章节正文导出为可下载的纯文本 (.txt) / Markdown (.md)."""
+    """把章节正文导出为可下载的纯文�?(.txt) / Markdown (.md)."""
     try:
         detail = await creation_service.get_chapter_detail(chapter_id)
     except creation_service.CreationError as exc:
@@ -525,7 +547,7 @@ async def export_chapter(
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # 文件名: ASCII 兜底 (latin-1 兼容) + RFC 5987 中文名
+    # 文件�? ASCII 兜底 (latin-1 兼容) + RFC 5987 中文�?
     project = detail.get("project_id")
     ch = detail
     title = ch.get("title") or f"第 {ch.get('chapter_no')} 章"
@@ -539,7 +561,7 @@ async def export_chapter(
     from urllib.parse import quote as _quote
     filename_star = _quote(filename, safe="")
 
-    # BOM 让 Windows 记事本识别 UTF-8
+    # BOM �?Windows 记事本识�?UTF-8
     content_bytes = (b"\xef\xbb\xbf" + body.encode("utf-8")) if format == "txt" else body.encode("utf-8")
     media_type = "text/plain; charset=utf-8" if format == "txt" else "text/markdown; charset=utf-8"
 
@@ -563,8 +585,8 @@ async def export_project(
 ):
     """UX-#16: 全本导出. 把整个项目所有已确认章节合并为一个可下载文件 (.txt / .md).
 
-    章节按 ``chapter_no`` 升序拼接, 章节之间空一行, 文件头写入项目标题与
-    生成时间. 跟单章导出一样支持 ASCII 兜底文件名 + RFC 5987 中文名.
+    章节�?``chapter_no`` 升序拼接, 章节之间空一�? 文件头写入项目标题与
+    生成时间. 跟单章导出一样支�?ASCII 兜底文件�?+ RFC 5987 中文�?
     """
     try:
         detail = await creation_service.get_project_detail(project_id)
@@ -611,12 +633,22 @@ async def generate_chapter(project_id: int, payload: AiChapterGenerateRequest):
 
     任务以应用作用域的 ``TaskRecord`` 形式跑在 ``TaskRegistry`` 中, 同一
     项目同时只允许 1 个生成任务. SSE 客户端断开不再取消任务.
+
+    修复 #14: 之前的 HTTPException (404 / 409) 在 SSE 模式下会直接断开流,
+    前端拿不到 detail 文案, toast 显示 "请求失败 (404)". 改为: 业务校验
+    失败时返回一个 fallback record, 通过 record.publish({event: "error",
+    message: ...}) 把消息推给客户端. 仅当 registry.register 因「同 scope
+    已有任务」冲突时, 才保持 409 — 这种情况下客户端需要立刻重定向到
+    banner 重连.
     """
     # 校验项目存在, 顺便拿到 title 用于 banner 文案
     try:
         project = await creation_service.get_project_detail(project_id)
     except creation_service.CreationError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # 用一个临时 record 推 error 事件后结束
+        return await _sse_error_response(
+            404, f"项目 {project_id} 不存在: {exc}"
+        )
 
     try:
         record = await registry.register(
@@ -624,15 +656,18 @@ async def generate_chapter(project_id: int, payload: AiChapterGenerateRequest):
             subject_id=project_id,
             title=str(project.get("project", {}).get("title") or f"项目 {project_id}"),
             meta={
+                # 修复 #19: 跨章节互斥 — 同一个项目同时只允许跑 1 个生成任务
+                "scope": f"project:{project_id}",
                 "chapter_no": payload.chapter_no,
                 "user_intent": payload.user_intent or "",
                 "title_hint": payload.title or "",
-                "mode": payload.mode,
+                "force": payload.force,
                 "max_revise": payload.max_revise,
                 "score_threshold": payload.score_threshold,
             },
         )
     except RuntimeError as exc:
+        # 同 scope 已有任务 — 保留 HTTP 409, 让前端能区分"重连已有任务"
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     async def _runner() -> None:
@@ -643,6 +678,7 @@ async def generate_chapter(project_id: int, payload: AiChapterGenerateRequest):
                 user_intent=payload.user_intent,
                 chapter_no=payload.chapter_no,
                 title=payload.title,
+                force=payload.force,
                 max_revise=payload.max_revise,
                 score_threshold=payload.score_threshold,
             ):
@@ -667,7 +703,7 @@ async def generate_chapter(project_id: int, payload: AiChapterGenerateRequest):
     # 启动应用作用域的后台任务
     asyncio.create_task(_runner())
 
-    # 第一个事件携带 task_id, 方便前端持久化
+    # 第一个事件携�?task_id, 方便前端持久�?
     await record.publish(
         {
             "event": "registered",
@@ -736,3 +772,4 @@ async def confirm_chapter(chapter_id: int):
     except creation_service.CreationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"chapter": ch}
+

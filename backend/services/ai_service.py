@@ -3,17 +3,50 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 
+import database as db
 from schemas import ConnectionTestRequest, ConnectionTestResponse
+from services.ai_providers import get_provider
+from services.metrics_service import record_llm_call
 
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = 60.0
 CHAT_TIMEOUT_SECONDS = 90.0
 CONNECTION_TEST_PROMPT_KEY = "connection.test"
+
+
+async def resolve_chat_model(
+    model_id: Optional[int],
+    *,
+    capability: str = "chat",
+) -> Optional[Dict[str, Any]]:
+    """修复 #8: 统一的 chat/image 模型解析器.
+
+    之前在 ``creation_service._resolve_model_cfg`` 与
+    ``creation_intake_service._resolve_model_cfg`` 中各复制了一份, 存在逻辑
+    漂移风险. 现在合并到 ai_service, 行为约定:
+
+    * ``model_id`` 非空 → 优先用指定 ID, 必须 ``enabled=1`` 才返回
+    * 否则 → 取 ``enabled=1`` 且 ``capability=capability`` 的第一个
+
+    Returns dict (与 ``db.get_config_by_id`` 一致) 或 None (无可用).
+    """
+    if model_id:
+        cfg = await db.get_config_by_id(int(model_id))
+        if cfg and int(cfg.get("enabled", 0)) == 1:
+            return cfg
+        logger.warning(
+            "resolve_chat_model: model_id=%s unavailable (不存在或被禁用), 回退到第一个可用 chat 模型",
+            model_id,
+        )
+    enabled = await db.get_enabled_configs_by_capability(capability)
+    if not enabled:
+        return None
+    return enabled[0]
 
 
 async def _resolve_connection_test_payload() -> Dict[str, Any]:
@@ -45,7 +78,6 @@ async def _send_probe(client: httpx.AsyncClient, request: ConnectionTestRequest)
         "Authorization": f"Bearer {request.api_key}",
         "Content-Type": "application/json",
     }
-
     # Image generation models dispatch through the image_service provider
     # registry (MiniMax, DashScope, …). Each provider owns its own URL path
     # and request envelope.
@@ -59,40 +91,19 @@ async def _send_probe(client: httpx.AsyncClient, request: ConnectionTestRequest)
         )
         return await client.post(endpoint, headers=headers, json=payload)
 
-    payload: Dict[str, Any] = {
-        "model": request.model_name,
-        "max_tokens": 1,
-    }
-
     test_payload = await _resolve_connection_test_payload()
-    system_prompt = test_payload["system_prompt"]
-    user_prompt = test_payload["user_prompt"]
-
-    if request.provider.lower() == "anthropic":
-        return await client.post(
-            f"{request.model_url.rstrip('/')}/v1/messages",
-            headers={**headers, "anthropic-version": "2023-06-01"},
-            json={
-                **payload,
-                "system": system_prompt,
-                "messages": [{"role": "user", "content": user_prompt}],
-            },
-        )
-
-    if system_prompt:
-        messages: List[Dict[str, str]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-    else:
-        messages = [{"role": "user", "content": user_prompt}]
+    provider_impl = get_provider(request.provider or "")
+    prepared = provider_impl.build_probe_request(
+        model_url=request.model_url,
+        api_key=request.api_key,
+        model_name=request.model_name,
+        system_prompt=test_payload["system_prompt"],
+        user_prompt=test_payload["user_prompt"],
+    )
     return await client.post(
-        f"{request.model_url.rstrip('/')}/v1/chat/completions",
-        headers=headers,
-        json={
-            **payload,
-            "messages": messages,
-        },
+        prepared.endpoint,
+        headers=prepared.headers,
+        json=prepared.body,
     )
 
 
@@ -146,28 +157,6 @@ async def test_connection(request: ConnectionTestRequest) -> ConnectionTestRespo
 class AIRequestError(RuntimeError):
     """Raised when the AI backend returns an unrecoverable error."""
 
-
-def _extract_text_from_response(provider: str, payload: Dict[str, Any]) -> str:
-    if not payload:
-        return ""
-    if provider.lower() == "anthropic":
-        content = payload.get("content")
-        if isinstance(content, list):
-            parts: List[str] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-            return "\n".join(parts).strip()
-        if isinstance(content, str):
-            return content.strip()
-        return ""
-    choices = payload.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    return (message.get("content") or "").strip()
-
-
 async def chat_completion(
     *,
     provider: str,
@@ -189,40 +178,26 @@ async def chat_completion(
     pass ``retries=2`` to absorb the occasional "AI 响应内容为空" from
     anthropic-protocol proxies that return thinking-only blocks.
     """
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    provider_key = (provider or "").lower()
-    if provider_key == "anthropic":
-        body: Dict[str, Any] = {
-            "model": model_name,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_prompt}],
-        }
-        endpoint = f"{model_url.rstrip('/')}/v1/messages"
-        request_headers = {**headers, "anthropic-version": "2023-06-01"}
-    else:
-        body = {
-            "model": model_name,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        endpoint = f"{model_url.rstrip('/')}/v1/chat/completions"
-        request_headers = headers
+    started = time.monotonic()
+    provider_impl = get_provider(provider)
+    prepared = provider_impl.build_chat_request(
+        model_url=model_url,
+        api_key=api_key,
+        model_name=model_name,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
 
     last_exc: Optional[AIRequestError] = None
     for attempt in range(1, max(1, retries) + 2):  # attempts = retries + 1
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
-                    endpoint, headers=request_headers, json=body
+                    prepared.endpoint,
+                    headers=prepared.headers,
+                    json=prepared.body,
                 )
         except httpx.TimeoutException as exc:
             last_exc = AIRequestError(f"AI 请求超时: {exc}")
@@ -240,10 +215,16 @@ async def chat_completion(
                 except json.JSONDecodeError as exc:
                     last_exc = AIRequestError("AI 响应不是有效的 JSON")
                 else:
-                    text = _extract_text_from_response(provider, payload)
+                    text = provider_impl.extract_text(payload)
                     if not text:
                         last_exc = AIRequestError("AI 响应内容为空")
                     else:
+                        record_llm_call(
+                            provider,
+                            "success",
+                            time.monotonic() - started,
+                            **provider_impl.extract_usage_tokens(payload),
+                        )
                         return text
         # 4xx errors are not retriable (they'll fail again); everything
         # else (timeout, network, 5xx, empty content) is worth retrying.
@@ -253,6 +234,8 @@ async def chat_completion(
             import asyncio as _asyncio
             await _asyncio.sleep(retry_base_delay * (2 ** (attempt - 1)))
     assert last_exc is not None  # loop only exits via return or via last_exc
+    status = "client_error" if "AI 返回 4" in last_exc.args[0] else "error"
+    record_llm_call(provider, status, time.monotonic() - started)
     raise last_exc
 
 

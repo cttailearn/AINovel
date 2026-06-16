@@ -55,7 +55,7 @@ function formatTimestamp(value) {
   }
 }
 
-function NovelCard({ novel, onOpen, onStartReading, onDelete }) {
+function NovelCard({ novel, onOpen, onStartReading, onDelete, onBridgeToCreation }) {
   return (
     <article
       className={`project-card ${novel.chapter_count > 0 ? 'has-chapters' : ''}`}
@@ -82,6 +82,19 @@ function NovelCard({ novel, onOpen, onStartReading, onDelete }) {
           )}
         </span>
         <div className="project-card-actions" onClick={(e) => e.stopPropagation()}>
+          {novel.chapter_count > 0 && (
+            <button
+              type="button"
+              className="card-icon-btn"
+              title="导入到 AI 创作"
+              onClick={() => onBridgeToCreation?.(novel.id)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <path d="M12 19l7-7 3 3-7 7-3-3z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+                <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+              </svg>
+            </button>
+          )}
           {novel.chapter_count > 0 && (
             <button
               type="button"
@@ -299,7 +312,7 @@ function detailReducer(state, action) {
   }
 }
 
-function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged, initialTab, onGoToSettings }) {
+function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged, initialTab, onGoToSettings, onBridgeToCreation }) {
   const toast = useToast();
   const [state, dispatch] = useReducer(detailReducer, initialDetailState);
   const [chunkSize, setChunkSize] = useState(5000);
@@ -698,6 +711,15 @@ function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged, in
 
       {activePane === 'kg' && hasChapters && (
         <div className="embedded-panel kg-embedded">
+          <div className="page-actions" style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              className="new-project-btn"
+              onClick={() => onBridgeToCreation?.(novelId)}
+            >
+              导入到 AI 创作
+            </button>
+          </div>
           <KnowledgeGraphPanel
             key={`${novelId}-${reloadKey}`}
             novelId={novelId}
@@ -710,7 +732,7 @@ function NovelWorkbench({ novelId, models, onBack, onStartReading, onChanged, in
   );
 }
 
-export function Workbench({ models, topSearch = '', onGoToSettings }) {
+export function Workbench({ models, onGoToSettings, onBridgeToCreation }) {
   const toast = useToast();
   const [view, setView] = useState('list');
   const [selectedId, setSelectedId] = useState(null);
@@ -722,6 +744,8 @@ export function Workbench({ models, topSearch = '', onGoToSettings }) {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [toDeleteId, setToDeleteId] = useState(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  // 修复 #32: 页面内自管搜索
+  const [search, setSearch] = useState('');
   const uploadAbortRef = useRef(null);
 
   const fetchNovels = async () => {
@@ -806,6 +830,7 @@ export function Workbench({ models, topSearch = '', onGoToSettings }) {
           onStartReading={(id) => setReadingId(id)}
           onChanged={fetchNovels}
           onGoToSettings={onGoToSettings}
+          onBridgeToCreation={onBridgeToCreation}
         />
         {readingId && (
           <NovelReader novelId={readingId} onBack={() => setReadingId(null)} />
@@ -827,7 +852,7 @@ export function Workbench({ models, topSearch = '', onGoToSettings }) {
   }
 
   const filtered = novels.filter((n) => {
-    const q = topSearch.trim().toLowerCase();
+    const q = search.trim().toLowerCase();
     if (!q) return true;
     return (
       n.title.toLowerCase().includes(q) ||
@@ -840,6 +865,14 @@ export function Workbench({ models, topSearch = '', onGoToSettings }) {
     <div className="workbench-content">
       {novels.length > 0 && (
         <div className="page-actions">
+          {/* 修复 #32: 页面内搜索框, 替代顶层搜索 */}
+          <input
+            type="search"
+            className="page-search-input"
+            placeholder="搜索项目标题、作者或摘要..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
           <button
             type="button"
             className="new-project-btn"
@@ -853,9 +886,9 @@ export function Workbench({ models, topSearch = '', onGoToSettings }) {
         </div>
       )}
 
-      {novels.length > 0 && topSearch && (
+      {novels.length > 0 && search && (
         <div className="filter-summary">
-          正在显示包含 <strong>"{topSearch}"</strong> 的 {filtered.length} 个项目
+          正在显示包含 <strong>"{search}"</strong> 的 {filtered.length} 个项目
         </div>
       )}
 
@@ -900,6 +933,7 @@ export function Workbench({ models, topSearch = '', onGoToSettings }) {
               }}
               onStartReading={(id) => setReadingId(id)}
               onDelete={requestDelete}
+              onBridgeToCreation={onBridgeToCreation}
             />
           ))}
         </section>

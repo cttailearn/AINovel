@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react';
-import { alignParagraphs } from '../../utils/paragraphDiff.js';
+import { alignParagraphs, alignParagraphsFromSegments } from '../../utils/paragraphDiff.js';
 
 /**
  * 并排对比视图: 左原文, 右改写, 段落级同步滚动.
@@ -9,8 +9,13 @@ import { alignParagraphs } from '../../utils/paragraphDiff.js';
  * - 'orig_only': 左侧占段, 右侧占位"已删除"
  * - 'rwt_only': 右侧占段, 左侧占位"AI 新增"
  */
-export function SideBySideReader({ original = '', rewrite = '' }) {
-  const pairs = useMemo(() => alignParagraphs(original, rewrite), [original, rewrite]);
+export function SideBySideReader({ original = '', rewrite = '', diffSegments = null }) {
+  const pairs = useMemo(() => {
+    if (Array.isArray(diffSegments) && diffSegments.length > 0) {
+      return alignParagraphsFromSegments(diffSegments);
+    }
+    return alignParagraphs(original, rewrite);
+  }, [diffSegments, original, rewrite]);
   const leftRef = useRef(null);
   const rightRef = useRef(null);
   const syncing = useRef(false);

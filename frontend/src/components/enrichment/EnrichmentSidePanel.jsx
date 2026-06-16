@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client.js';
 import { useToast } from '../Toast/ToastProvider.jsx';
 import {
@@ -184,7 +184,7 @@ export function EnrichmentSidePanel({
   };
 
   // 加载 diff
-  const handleLoadPreview = async () => {
+  const handleLoadPreview = useCallback(async () => {
     if (!chapter?.id) return;
     setDiffLoading(true);
     try {
@@ -195,7 +195,12 @@ export function EnrichmentSidePanel({
     } finally {
       setDiffLoading(false);
     }
-  };
+  }, [chapter?.id, toast]);
+
+  useEffect(() => {
+    if (!chapter?.id || !hasRewrite || diff || diffLoading) return;
+    handleLoadPreview();
+  }, [chapter?.id, hasRewrite, diff, diffLoading, handleLoadPreview]);
 
   const handleApply = async () => {
     if (!chapter?.id) return;
@@ -574,12 +579,14 @@ export function EnrichmentSidePanel({
                         <MergedReader
                           original={detail.content || ''}
                           rewrite={detail.rewrite_text || ''}
+                          diffSegments={diff?.segments || null}
                         />
                       )}
                       {viewMode === 'sidebyside' && (
                         <SideBySideReader
                           original={detail.content || ''}
                           rewrite={detail.rewrite_text || ''}
+                          diffSegments={diff?.segments || null}
                         />
                       )}
 

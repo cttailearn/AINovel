@@ -199,3 +199,68 @@ async def test_finish_marks_done_even_without_subscribers(fresh_registry):
     snap = rec.snapshot()
     assert snap["done"] is True
     assert snap["final_state"] == "complete"
+
+
+# 修复 #19: scope 维度互斥
+@pytest.mark.asyncio
+async def test_scope_blocks_same_scope_concurrent_tasks(fresh_registry):
+    """同一 scope 同时只允许 1 个任务, 即使 subject_id 不同."""
+    rec_a = await fresh_registry.register(
+        kind=KIND_CREATION,
+        subject_id=1,
+        title="第 1 章生成",
+        meta={"scope": "project:42"},
+    )
+    with pytest.raises(RuntimeError) as exc:
+        await fresh_registry.register(
+            kind=KIND_CREATION,
+            subject_id=2,  # 不同 subject_id 也阻挡
+            title="第 2 章生成",
+            meta={"scope": "project:42"},
+        )
+    assert "scope=project:42" in str(exc.value)
+    # 让第一个结束, 第二个就能注册
+    await rec_a.finish("complete")
+    rec_b = await fresh_registry.register(
+        kind=KIND_CREATION,
+        subject_id=2,
+        title="第 2 章生成",
+        meta={"scope": "project:42"},
+    )
+    assert rec_b.task_id != rec_a.task_id
+
+
+@pytest.mark.asyncio
+async def test_scope_different_scope_coexists(fresh_registry):
+    """不同 scope 可以同时跑 (一个加料, 一个生成)."""
+    r1 = await fresh_registry.register(
+        kind=KIND_ENRICHMENT,
+        subject_id=1,
+        title="加料",
+        meta={"scope": "novel:1"},
+    )
+    r2 = await fresh_registry.register(
+        kind=KIND_CREATION,
+        subject_id=2,
+        title="生成",
+        meta={"scope": "project:2"},
+    )
+    assert r1.task_id != r2.task_id
+    assert len(fresh_registry.get_active()) == 2
+
+
+@pytest.mark.asyncio
+async def test_scope_legacy_subject_id_dimension_still_works(fresh_registry):
+    """不带 scope 时, 退化到 (kind, subject_id) 旧行为."""
+    rec_a = await fresh_registry.register(
+        kind=KIND_CREATION, subject_id=5, title="A"
+    )
+    with pytest.raises(RuntimeError):
+        await fresh_registry.register(
+            kind=KIND_CREATION, subject_id=5, title="A again"
+        )
+    # 不同 subject_id 不阻挡
+    rec_b = await fresh_registry.register(
+        kind=KIND_CREATION, subject_id=6, title="B"
+    )
+    assert rec_b.task_id != rec_a.task_id

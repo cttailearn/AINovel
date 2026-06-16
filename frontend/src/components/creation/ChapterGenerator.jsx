@@ -1,17 +1,18 @@
 // 单章节生成: 用户输入意图 → SSE 推送 Planner / Writer / Critic 进度
 // 支持 regenMode: 预填标题, 显示"重新生成第 N 章", 提供取消按钮
 // UX-#2: 失败时支持 retry, lastError + onRetry 由父级传入
-import { useEffect, useState } from 'react';
+//
+// 修复 #25: 当前流水线是单候选 (Planner → Writer → Critic), 旧版
+// writer_1_done / writer_2_done / critic_1_done / critic_2_done 等多候选
+// 标签已无对应事件触发, 保留会误导新人. 已删除.
+import { useCallback, useEffect, useState } from 'react';
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts.js';
 
 const STAGE_LABELS = {
   start: '准备',
   planner_done: '决策完成',
-  writer_0_done: '候选 1 写作完成',
-  writer_1_done: '候选 2 写作完成',
-  writer_2_done: '候选 3 写作完成',
-  critic_0_done: '候选 1 审核完成',
-  critic_1_done: '候选 2 审核完成',
-  critic_2_done: '候选 3 审核完成',
+  writer_0_done: '写作完成',
+  critic_0_done: '审核完成',
   done: '全部完成',
   error: '出错',
 };
@@ -40,6 +41,24 @@ export function ChapterGenerator({
 }) {
   const [userIntent, setUserIntent] = useState(initialUserIntent || '');
   const [title, setTitle] = useState(initialTitle || '');
+
+  // 修复 #35: 键盘快捷键 — Ctrl+Enter 触发生成, Esc 取消
+  const handleSubmit = useCallback(() => {
+    if (generating) return;
+    onGenerate?.({
+      user_intent: userIntent.trim(),
+      title: title.trim(),
+      chapter_no: nextChapterNo,
+    });
+  }, [generating, onGenerate, userIntent, title, nextChapterNo]);
+  const handleCancel = useCallback(() => {
+    if (generating) onCancel?.();
+  }, [generating, onCancel]);
+  useKeyboardShortcuts({
+    enabled: !generating,
+    onSubmit: handleSubmit,
+    onCancel: handleCancel,
+  });
 
   // regenMode 切换时, 重置 title 为 initialTitle
   useEffect(() => {
@@ -106,7 +125,7 @@ export function ChapterGenerator({
           )}
           {regenMode && (
             <div className="creation-regen-hint small">
-              重新生成会覆盖当前章节正文. 你可以填入新的需求(可选)或留空沿用, AI 会自动评分, 不达标会重写.
+              重新生成会保留旧变体历史并刷新当前章节正文。你可以填入新的需求，或留空沿用原意图；AI 会自动评分，不达标会继续重写。
             </div>
           )}
           <div className="form-row">
@@ -152,17 +171,17 @@ export function ChapterGenerator({
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => onGenerate({
-                user_intent: userIntent.trim(),
-                title: title.trim(),
-                chapter_no: nextChapterNo,
-              })}
+              onClick={handleSubmit}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" strokeWidth="1.6">
                 <path d="M5 12l5 5L20 7" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
               {submitLabel}
             </button>
+            {/* 修复 #35: 提示快捷键 */}
+            <span className="creation-shortcut-hint" aria-label="快捷键提示">
+              <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 生成 · <kbd>Esc</kbd> 取消
+            </span>
           </div>
         </div>
       ) : (
